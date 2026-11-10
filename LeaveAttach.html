@@ -1,0 +1,335 @@
+<style>
+  .lva-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .lva-row:empty { display: none; }
+  .lva-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .lva-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px;
+              border: 1px solid var(--outline-2, #e5e7eb); border-radius: 10px; }
+  .lva-item .lva-name { flex: 1; min-width: 140px; word-break: break-all; }
+  .lva-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; flex: none; }
+  .lva-viewer { margin-top: 12px; }
+  .lva-viewer img { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto 10px; border-radius: 8px; }
+  .lva-viewer .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+</style>
+<script>
+'use strict';
+/* Phoenix Workspace — LeaveAttach
+ * แนบใบรับรองแพทย์ / เอกสารประกอบกับ "ใบลาออนไลน์ทั้งใบ" (context LEAVE_REQ ใน 13_Attach.gs)
+ *   · ฟอร์มยื่นลา: ถ่ายรูปหรือเลือกไฟล์ได้ทันที ระบบย่อรูปก่อนส่ง แล้วอัปโหลดหลังบันทึกใบลาสำเร็จ
+ *   · ประวัติการลา (ผู้ปฏิบัติงานโครงการ) และหน้าจัดการใบลา (ฝ่ายเลขานุการโครงการ): ปุ่มแนบ/ดูเอกสาร + ป้าย "ยังไม่แนบใบรับรองแพทย์" สำหรับลาป่วย
+ *   · เปิดดูไฟล์ผ่าน apiAttachView เท่านั้น (ตรวจสิทธิ์ + บันทึก AuditLog) — ไม่มีลิงก์ Drive หลุดออกไป
+ * ไม่แก้ไฟล์เดิม: ต่อเข้ากับ RENDER.leave / RENDER.myleaves / RENDER.certify แบบเดียวกับที่ Portal ต่อ RENDER.person
+ * ต้องโหลดหลัง App และ Portal (Index.html: <?!= include('LeaveAttach'); ?> ต่อจาก include('AttReport'))
+ */
+API_FILE.apiAttachView = '13_Attach';
+API_FILE.apiAttachIndex = '13_Attach';
+
+var LVA = {
+  idx: null, idxAt: 0, pending: null, off: false,   // off = เซิร์ฟเวอร์ยังไม่มีคำสั่งใหม่ → ซ่อนปุ่มทั้งหมด
+  staged: [], preparing: 0, urls: [],
+  MAX_FILES: 5, MAX_SIDE: 1600, JPEG_Q: 0.82, MAX_BYTES: 10 * 1024 * 1024, IDX_TTL: 60000
+};
+var LVA_OPEN = { PENDING: 1, CERTIFIED: 1 };            // สถานะใบลาที่ยังแนบไฟล์เพิ่มได้ (ตรงกับ ATTACH_REQ_OPEN ฝั่งเซิร์ฟเวอร์)
+var LVA_ACCEPT = 'image/*,' + ATTACH_ACCEPT;
+
+function lvaReq(id) { return (st.d.leaveReqs || []).filter(function (q) { return q.reqId === id; })[0] || null; }
+function lvaEnabled() { return !!String(S('DRIVE_ROOT_FOLDER_ID') || '').trim(); }
+
+// ------------------------------------------------------------------ เตรียมไฟล์ (ย่อรูป → JPEG)
+function lvaReadB64(f) {
+  return new Promise(function (res, rej) {
+    var r = new FileReader();
+    r.onload = function () { res(String(r.result).split(',')[1] || ''); };
+    r.onerror = function () { rej(new Error('อ่านไฟล์ไม่สำเร็จ')); };
+    r.readAsDataURL(f);
+  });
+}
+function lvaIsImage(f) { return /^image\//.test(f.type || '') || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name || ''); }
+/** วาดรูปลง canvas ด้านยาวไม่เกิน MAX_SIDE แล้วคืน dataURL แบบ JPEG · เบราว์เซอร์อ่านรูปนี้ไม่ได้ = null */
+function lvaCompress(f) {
+  return new Promise(function (res) {
+    var url;
+    try { url = URL.createObjectURL(f); } catch (e) { return res(null); }
+    var img = new Image();
+    img.onload = function () {
+      try {
+        var w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { URL.revokeObjectURL(url); return res(null); }
+        var s = Math.min(1, LVA.MAX_SIDE / Math.max(w, h));
+        var cv = document.createElement('canvas');
+        cv.width = Math.round(w * s); cv.height = Math.round(h * s);
+        var g = cv.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);      // PNG โปร่งใส → พื้นขาว
+        g.drawImage(img, 0, 0, cv.width, cv.height);
+        URL.revokeObjectURL(url);
+        res(cv.toDataURL('image/jpeg', LVA.JPEG_Q));
+      } catch (e) { URL.revokeObjectURL(url); res(null); }
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+}
+/** คืน { name, mime, b64, size } พร้อมส่ง — รูปถูกย่อเป็น JPEG ถ้าเล็กกว่าเดิมหรือไฟล์เดิมเป็นชนิดที่ระบบไม่รับ (เช่น HEIC) */
+function lvaPrepare(f) {
+  var ext = (String(f.name || '').split('.').pop() || '').toLowerCase();
+  var base = String(f.name || '').replace(/\.[^.]+$/, '') || 'ใบรับรองแพทย์';
+  var okExt = !!ATTACH_MIME_BY_EXT[ext];
+  return (lvaIsImage(f) ? lvaCompress(f) : Promise.resolve(null)).then(function (dataUrl) {
+    var b64 = dataUrl ? dataUrl.split(',')[1] || '' : '';
+    var size = b64 ? Math.floor(b64.length * 3 / 4) : 0;
+    if (b64 && (size < f.size || !okExt)) return { name: base + '.jpg', mime: 'image/jpeg', b64: b64, size: size };
+    if (!okExt) throw new Error(f.name + ': รองรับเฉพาะรูปภาพ / PDF / Word / Excel');
+    if (f.size > LVA.MAX_BYTES) throw new Error(f.name + ': ไฟล์ใหญ่เกิน 10MB');
+    return lvaReadB64(f).then(function (raw) {
+      return { name: f.name, mime: f.type || ATTACH_MIME_BY_EXT[ext], b64: raw, size: f.size };
+    });
+  });
+}
+function lvaUploadAll(reqId, files) {
+  var out = { ok: 0, fail: [] };
+  return files.reduce(function (p, s) {
+    return p.then(function () {
+      return call('apiAttachUpload', st.token, 'LEAVE_REQ', reqId, s.name, s.mime, s.b64)
+        .then(function () { out.ok++; }, function (e) { out.fail.push(s.name + ' — ' + ((e && e.message) || e)); });
+    });
+  }, Promise.resolve()).then(function () {
+    if (LVA.idx) LVA.idx[reqId] = (LVA.idx[reqId] || 0) + out.ok;
+    return out;
+  });
+}
+
+// ------------------------------------------------------------------ จำนวนไฟล์ต่อใบลา + ป้ายบนการ์ด
+function lvaLoadIdx(force) {
+  if (LVA.off) return Promise.resolve({});
+  if (LVA.idx && !force && Date.now() - LVA.idxAt < LVA.IDX_TTL) return Promise.resolve(LVA.idx);
+  if (LVA.pending) return LVA.pending;
+  LVA.pending = call('apiAttachIndex', st.token, 'LEAVE_REQ').then(function (m) {
+    LVA.idx = m || {}; LVA.idxAt = Date.now(); return LVA.idx;
+  }, function (e) {
+    if (e && e.code === 'NO_API') LVA.off = true;
+    else if (e && e.code === 'AUTH') handleErr(e);
+    return LVA.idx || {};
+  }).then(function (m) { LVA.pending = null; return m; });
+  return LVA.pending;
+}
+function lvaPaint() {
+  $$('[data-lva]').forEach(function (row) {
+    var id = row.getAttribute('data-lva'), q = lvaReq(id);
+    if (!q || LVA.off) { row.innerHTML = ''; return; }
+    var n = LVA.idx ? (LVA.idx[id] || 0) : null, open = !!LVA_OPEN[q.status];
+    var label = n ? '📎 เอกสารแนบ ' + n + ' ไฟล์'
+      : n === null ? (open ? '📎 เอกสารแนบ' : '')
+      : (open ? (q.type === 'SICK' ? '📎 แนบใบรับรองแพทย์' : '📎 แนบเอกสาร') : '');
+    var warn = q.type === 'SICK' && n === 0 && open ? pill('ยังไม่แนบใบรับรองแพทย์', 'warn') : '';
+    row.innerHTML = (label ? '<button class="btn sm" type="button" data-lva-open="' + esc(id) + '">' + label + '</button>' : '') + warn;
+  });
+}
+
+// ------------------------------------------------------------------ ฟอร์มยื่นลา: เลือกไฟล์ไว้ก่อน อัปโหลดหลังบันทึกใบลา
+function lvaHintText() {
+  var t = lvSelType();
+  return t === 'SICK'
+    ? 'ลาป่วย: ถ่ายรูปใบรับรองแพทย์แนบได้เลย ถ้ายังไม่ได้ใบรับรอง แนบภายหลังได้ที่ "ประวัติการลา"'
+    : 'แนบได้ทั้งรูปถ่ายและไฟล์ PDF / Word / Excel · รูปจะถูกย่อให้เล็กลงก่อนส่ง · แนบภายหลังได้ที่ "ประวัติการลา"';
+}
+function lvaFormMount() {
+  var root = $('#lvF'); if (!root || $('#lvaFormBox')) return;
+  var urlField = ($('[name=attachUrl]', root) || {}).closest ? $('[name=attachUrl]', root).closest('.field') : null;
+  var html = '<div class="field full" id="lvaFormBox"><label>แนบรูป / ไฟล์ใบรับรองแพทย์ <span class="muted">(ถ้ามี)</span></label>' +
+    (lvaEnabled()
+      ? '<div class="lva-list" id="lvaStaged"></div>' +
+        '<div class="lva-row"><label class="btn sm">📷 ถ่ายรูป / เลือกไฟล์<input type="file" id="lvaFormPick" accept="' + LVA_ACCEPT + '" multiple hidden></label>' +
+        '<span class="muted small" id="lvaHint"></span></div>'
+      : '<div class="muted small">ยังไม่ได้เปิดใช้การแนบไฟล์ — ฝ่ายเลขานุการโครงการตั้งโฟลเดอร์ Google Drive ได้ที่หน้าตั้งค่า · ระหว่างนี้วางลิงก์เอกสารในช่องด้านบนได้</div>') +
+    '</div>';
+  if (urlField) urlField.insertAdjacentHTML('afterend', html);
+  else root.insertAdjacentHTML('beforeend', html);
+  lvaStagedPaint();
+  var hint = $('#lvaHint'); if (hint) hint.textContent = lvaHintText();
+  root.addEventListener('change', function () { var h = $('#lvaHint'); if (h) h.textContent = lvaHintText(); });
+  var go = $('#lvGo'); if (go) go.onclick = lvaSubmit;
+}
+function lvaStagedPaint() {
+  var el = $('#lvaStaged'); if (!el) return;
+  el.innerHTML = LVA.staged.map(function (s, i) {
+    return '<div class="lva-item">' +
+      (/^image\//.test(s.mime) ? '<img class="lva-thumb" alt="" src="data:' + esc(s.mime) + ';base64,' + s.b64 + '">' : '<span>📄</span>') +
+      '<span class="lva-name">' + esc(s.name) + '</span><span class="muted small">' + fileSizeTxt(s.size) + '</span>' +
+      '<button class="btn sm icon" type="button" data-lva-unstage="' + i + '" title="นำออก">✕</button></div>';
+  }).join('') + (LVA.preparing ? '<div class="muted small">กำลังเตรียมไฟล์ ' + LVA.preparing + ' ไฟล์…</div>' : '');
+}
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'lvaFormPick') return;
+  var files = Array.prototype.slice.call(e.target.files || []); e.target.value = '';
+  var room = LVA.MAX_FILES - LVA.staged.length - LVA.preparing;
+  if (files.length > room) { toast('แนบได้ไม่เกิน ' + LVA.MAX_FILES + ' ไฟล์ต่อใบลา', true); files = files.slice(0, Math.max(0, room)); }
+  files.forEach(function (f) {
+    LVA.preparing++; lvaStagedPaint();
+    lvaPrepare(f).then(function (s) { LVA.staged.push(s); }, function (er) { toast(er.message, true); })
+      .then(function () { LVA.preparing--; lvaStagedPaint(); });
+  });
+});
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-lva-unstage]'); if (!b) return;
+  LVA.staged.splice(+b.getAttribute('data-lva-unstage'), 1); lvaStagedPaint();
+});
+/** เหมือน lvSubmit ใน Portal ทุกอย่าง + อัปโหลดไฟล์ที่เลือกไว้เมื่อได้เลขใบลาแล้ว */
+function lvaSubmit() {
+  var f = lvRead(), b = $('#lvGo');
+  if (!f.dateFrom) return toast('กรุณาระบุช่วงวันที่', true);
+  if (lvNeedNote(f.type) && !f.reason) return toast('กรุณาระบุหมายเหตุ', true);
+  if (LVA.preparing) return toast('กำลังเตรียมไฟล์แนบ รอสักครู่แล้วกดบันทึกอีกครั้ง', true);
+  if (!lvNeedNote(f.type)) f.reason = '';
+  var files = LVA.staged.slice(), reqId = '';
+  b.disabled = true; b.textContent = 'กำลังบันทึก…';
+  call('apiSubmitLeave', st.token, f).then(function (res) {
+    var q = res.req || res;
+    reqId = q.reqId;
+    st.d.leaveReqs.push(q);
+    (res.records || []).forEach(function (r) { st.d.records.push(r); });
+    st.leaveDraft = null;
+    buildIndex(); updateBadges();
+    if (!files.length) return { ok: 0, fail: [] };
+    b.textContent = 'กำลังแนบไฟล์ ' + files.length + ' ไฟล์…';
+    return lvaUploadAll(reqId, files);
+  }).then(function (u) {
+    if (!reqId) return;
+    LVA.staged = [];
+    var msg = 'บันทึกข้อมูลเรียบร้อยแล้ว (' + reqId + ')' + (u.ok ? ' · แนบไฟล์ ' + u.ok + ' ไฟล์' : '');
+    if (u.fail.length) toast(msg + ' · แนบไม่สำเร็จ ' + u.fail.length + ' ไฟล์ — แนบใหม่ได้ที่ประวัติการลา', true);
+    else toast(msg);
+    RENDER.leave();
+    var fold = $('#leaveHistoryFold'); if (fold) fold.open = true;
+  }).catch(handleErr).then(function () {
+    var bb = $('#lvGo'); if (bb) { bb.disabled = false; bb.textContent = 'บันทึกข้อมูล'; }
+  });
+}
+
+// ------------------------------------------------------------------ หน้าต่างเอกสารของใบลา (เจ้าของ + ฝ่ายเลขานุการโครงการ)
+function lvaRevokeUrls() { LVA.urls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* - */ } }); LVA.urls = []; }
+function lvaOpen(reqId) {
+  var q = lvaReq(reqId); if (!q) return;
+  lvaRevokeUrls();
+  var open = !!LVA_OPEN[q.status], p = IX.people[q.personId] || {};
+  openModal('<h3>เอกสารประกอบใบลา ' + esc(reqId) + '</h3>' +
+    '<p class="muted small">' + esc((isStaff() ? (p.fullName || '') + ' · ' : '') + tlabel(q.type) + ' · ' + lvWhen(q)) + '</p>' +
+    '<p class="muted small">เปิดดูได้เฉพาะเจ้าของใบลาและฝ่ายเลขานุการโครงการ · ระบบบันทึกทุกครั้งที่เปิดไฟล์</p>' +
+    '<div class="lva-list" id="lvaList"><div class="muted small">กำลังโหลด…</div></div>' +
+    (open
+      ? '<div class="lva-row" style="margin-top:12px"><label class="btn sm primary">📷 ถ่ายรูป / เลือกไฟล์<input type="file" id="lvaPick" accept="' + LVA_ACCEPT + '" multiple hidden></label>' +
+        '<span class="muted small" id="lvaPickNote">รูปจะถูกย่อให้เล็กลงก่อนส่ง · ไม่เกิน 10MB ต่อไฟล์</span></div>'
+      : '<div class="note small" style="margin-top:12px">ใบลานี้ถูกยกเลิกหรือเพิกถอนแล้ว แนบไฟล์เพิ่มไม่ได้</div>') +
+    '<div class="lva-viewer" id="lvaViewer"></div>' +
+    '<div class="actions"><button class="btn" data-close>ปิด</button></div>');
+  $('#modal').setAttribute('data-lva-req', reqId);
+  lvaListLoad(reqId);
+}
+function lvaListLoad(reqId) {
+  var q = lvaReq(reqId), open = q && LVA_OPEN[q.status];
+  return call('apiAttachList', st.token, 'LEAVE_REQ', reqId).then(function (list) {
+    if (LVA.idx) { LVA.idx[reqId] = list.length; lvaPaint(); }
+    var el = $('#lvaList'); if (!el) return;
+    el.innerHTML = list.length ? list.map(function (a) {
+      return '<div class="lva-item"><span>' + (/^image\//.test(a.mimeType || '') ? '🖼️' : '📄') + '</span>' +
+        '<span class="lva-name">' + esc(a.fileName) + '<div class="muted small">' + fileSizeTxt(a.size) + ' · ' + esc(a.uploadedBy || '') +
+        (a.uploadedAt ? ' · ' + thDate(String(a.uploadedAt).slice(0, 10)) + ' ' + esc(String(a.uploadedAt).slice(11, 16)) : '') + '</div></span>' +
+        '<button class="btn sm" type="button" data-lva-view="' + esc(a.attachId) + '">เปิดดู</button>' +
+        (open ? '<button class="btn sm icon" type="button" data-lva-del="' + esc(a.attachId) + '" title="ลบไฟล์">✕</button>' : '') + '</div>';
+    }).join('') : '<div class="muted small">ยังไม่มีไฟล์แนบ</div>';
+  }).catch(function (e) {
+    var el = $('#lvaList');
+    if (el) el.innerHTML = '<div class="muted small">' + esc(e.code === 'NO_API' ? 'ยังไม่ได้อัปเดตไฟล์ 13_Attach ในระบบ' : e.message) + '</div>';
+    if (e.code === 'AUTH') handleErr(e);
+  });
+}
+function lvaView(attachId, btn) {
+  var box = $('#lvaViewer'); if (!box) return;
+  btn.disabled = true; box.innerHTML = '<div class="muted small">กำลังเปิดไฟล์…</div>';
+  call('apiAttachView', st.token, attachId).then(function (r) {
+    var bin = atob(r.b64 || ''), arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    var url = URL.createObjectURL(new Blob([arr], { type: r.mimeType || 'application/octet-stream' }));
+    LVA.urls.push(url);
+    var img = /^image\//.test(r.mimeType || '');
+    box.innerHTML = (img ? '<img alt="' + esc(r.fileName) + '" src="' + url + '">' : '') +
+      '<div class="row"><a class="btn sm" href="' + url + '" target="_blank" rel="noopener">เปิดในแท็บใหม่</a>' +
+      '<a class="btn sm" href="' + url + '" download="' + esc(r.fileName) + '">บันทึกไฟล์</a></div>';
+  }).catch(function (e) { box.innerHTML = ''; handleErr(e); })
+    .then(function () { btn.disabled = false; });
+}
+document.addEventListener('click', function (e) {
+  var o = e.target.closest('[data-lva-open]');
+  if (o) { lvaOpen(o.getAttribute('data-lva-open')); return; }
+  var v = e.target.closest('[data-lva-view]');
+  if (v) { lvaView(v.getAttribute('data-lva-view'), v); return; }
+  var d = e.target.closest('[data-lva-del]');
+  if (d) {
+    var reqId = $('#modal').getAttribute('data-lva-req');
+    if (!confirm('ลบไฟล์แนบนี้?')) return;
+    d.disabled = true;
+    call('apiAttachDelete', st.token, d.getAttribute('data-lva-del'))
+      .then(function () { toast('ลบไฟล์แนบแล้ว'); $('#lvaViewer').innerHTML = ''; return lvaListLoad(reqId); })
+      .catch(function (er) { d.disabled = false; handleErr(er); });
+  }
+});
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'lvaPick') return;
+  var reqId = $('#modal').getAttribute('data-lva-req');
+  var files = Array.prototype.slice.call(e.target.files || []).slice(0, LVA.MAX_FILES); e.target.value = '';
+  if (!files.length || !reqId) return;
+  var note = $('#lvaPickNote'), pick = e.target.closest('label');
+  if (pick) pick.classList.add('disabled');
+  if (note) note.textContent = 'กำลังเตรียมและอัปโหลด ' + files.length + ' ไฟล์…';
+  var ready = [], bad = [];
+  Promise.all(files.map(function (f) {
+    return lvaPrepare(f).then(function (s) { ready.push(s); }, function (er) { bad.push(er.message); });
+  })).then(function () { return ready.length ? lvaUploadAll(reqId, ready) : { ok: 0, fail: [] }; })
+    .then(function (u) {
+      var fails = bad.concat(u.fail);
+      toast((u.ok ? 'แนบไฟล์แล้ว ' + u.ok + ' ไฟล์' : 'ยังไม่ได้แนบไฟล์') + (fails.length ? ' · ไม่สำเร็จ: ' + fails.join(' | ') : ''), !!fails.length);
+      return lvaListLoad(reqId);
+    })
+    .catch(handleErr)
+    .then(function () {
+      if (pick) pick.classList.remove('disabled');
+      var n = $('#lvaPickNote'); if (n) n.textContent = 'รูปจะถูกย่อให้เล็กลงก่อนส่ง · ไม่เกิน 10MB ต่อไฟล์';
+    });
+});
+// คืนหน่วยความจำของไฟล์ที่เปิดดูเมื่อปิดหน้าต่าง
+$('#modalBg').addEventListener('click', function (e) {
+  if (e.target === this || e.target.closest('[data-close]')) { lvaRevokeUrls(); $('#modal').removeAttribute('data-lva-req'); }
+});
+
+// ------------------------------------------------------------------ ต่อเข้ากับหน้าที่มีอยู่
+(function () {
+  // ฟอร์มยื่นลา
+  var baseLeave = RENDER.leave;
+  RENDER.leave = function () { baseLeave.apply(this, arguments); lvaFormMount(); };
+
+  // ประวัติการลาของผู้ปฏิบัติงานโครงการ — การ์ดเรียงตาม submittedAt ใหม่ → เก่า เหมือน Portal
+  var baseMy = RENDER.myleaves;
+  RENDER.myleaves = function () {
+    baseMy.apply(this, arguments);
+    var list = (st.d.leaveReqs || []).slice().sort(function (a, b) { return a.submittedAt < b.submittedAt ? 1 : -1; });
+    $$('#myLeaveList .lv-card').forEach(function (card, i) {
+      var q = list[i], foot = card.querySelector('.lv-foot');
+      if (!q || !foot || card.querySelector('[data-lva]') || card.textContent.indexOf(q.reqId) === -1) return;
+      var row = document.createElement('div'); row.className = 'lva-row'; row.setAttribute('data-lva', q.reqId);
+      foot.parentNode.insertBefore(row, foot);
+    });
+    lvaPaint(); lvaLoadIdx().then(lvaPaint);
+  };
+
+  // หน้าจัดการใบลาของฝ่ายเลขานุการโครงการ — การ์ดมี id="cq-<reqId>"
+  var baseCert = RENDER.certify;
+  RENDER.certify = function () {
+    baseCert.apply(this, arguments);
+    $$('#certList [id^="cq-"]').forEach(function (card) {
+      var info = card.firstElementChild;
+      if (!info || info.querySelector('[data-lva]')) return;
+      var row = document.createElement('div'); row.className = 'lva-row'; row.setAttribute('data-lva', card.id.slice(3));
+      info.appendChild(row);
+    });
+    lvaPaint(); lvaLoadIdx().then(lvaPaint);
+  };
+})();
+</script>
