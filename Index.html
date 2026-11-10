@@ -1,652 +1,686 @@
-<!DOCTYPE html>
-<html lang="th">
-<head>
-  <base target="_top">
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;700;800;900&family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
-  <?!= include('Styles'); ?>
-</head>
-<body>
-  <!-- ================= เข้าสู่ระบบ / สมัคร ================= -->
-  <div class="auth hide" id="authView">
-    <div class="auth-side">
-      <div class="brand"><div class="brand-mark">P</div><div>Phoenix Workspace<small>ระบบการจัดการบุคลากรโครงการ</small></div></div>
-      <h1>บันทึกเวลาปฏิบัติงาน<br>ยื่นใบลา · ดูข้อมูลสรุป<br>ในระบบเดียว</h1>
-      <ol class="journey">
-        <li><b>01</b><span><strong>สมัครบัญชี</strong>ใช้รหัส SAP เป็นชื่อผู้ใช้ รอฝ่ายเลขานุการโครงการอนุมัติ</span></li>
-        <li><b>02</b><span><strong>สแกนรหัส QR หน้าห้องด้วยกล้องโทรศัพท์มือถือ</strong>ทั้งเวลามาปฏิบัติงานและเวลากลับ เข้าสู่ระบบเพียงครั้งเดียว เครื่องจะบันทึกไว้ให้</span></li>
-        <li><b>03</b><span><strong>ยื่นใบลาออนไลน์</strong>เมื่อฝ่ายเลขานุการโครงการรับรอง ระบบจะแจ้งหัวหน้าหน่วยงานทางอีเมล</span></li>
-        <li><b>04</b><span><strong>ตรวจสอบข้อมูลสรุปของตนเอง</strong>รายเดือน รายไตรมาส รายปีงบประมาณ</span></li>
-      </ol>
-    </div>
-    <div class="auth-main">
-      <div class="auth-card">
-        <div class="seg auth-tabs" id="authTabs"><button data-at="login" class="on">เข้าสู่ระบบ</button><button data-at="register">สมัครบัญชี</button></div>
-        <div class="note warn hide" id="authNote"></div>
-        <form id="loginForm" autocomplete="on">
-          <div class="field"><label>ชื่อผู้ใช้ (รหัส SAP)</label><input class="inp" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>
-          <div class="field"><label>รหัสผ่าน</label><input class="inp" type="password" name="password" autocomplete="current-password" required></div>
-          <button class="btn primary block" type="submit" id="loginGo">เข้าสู่ระบบ</button>
-          <p class="muted small center">กรณีลืมรหัสผ่าน กรุณาติดต่อฝ่ายเลขานุการโครงการเพื่อกำหนดรหัสผ่านใหม่</p>
-        </form>
-        <form id="regForm" class="hide" autocomplete="off">
-          <div class="form-grid">
-            <div class="field full"><label>ชื่อ-สกุล *</label><input class="inp" name="fullName" placeholder="เช่น นางสาว สมใจ ใจดี" required></div>
-            <div class="field"><label>รหัส SAP</label><input class="inp" name="sap" inputmode="numeric" placeholder="เช่น 10012345"></div>
-            <div class="field"><label>ชื่อผู้ใช้ *</label><input class="inp" name="username" autocapitalize="none" spellcheck="false" placeholder="ใช้รหัส SAP ได้" required></div>
-            <div class="field"><label>รหัสผ่าน *</label><input class="inp" type="password" name="password" autocomplete="new-password" required><small class="fhint" id="regPwHint"></small></div>
-            <div class="field"><label>ยืนยันรหัสผ่าน *</label><input class="inp" type="password" name="confirm" autocomplete="new-password" required></div>
-            <div class="field"><label>อีเมล (รับผลใบลา)</label><input class="inp" type="email" name="email" inputmode="email"></div>
-            <div class="field"><label>โทรศัพท์</label><input class="inp" name="phone" inputmode="tel"></div>
-            <div class="field"><label>ทีม</label><select class="inp" name="team"><option value="CLINICAL">Team Clinical</option><option value="PAS">Team PAS</option></select></div>
-            <div class="field"><label>หอผู้ป่วย / หน่วยงาน</label><input class="inp" name="ward"></div>
-            <div class="field full"><label>งานการพยาบาล</label><input class="inp" name="division"></div>
-            <label class="full small check"><input type="checkbox" id="regStaff"> ฉันเป็นฝ่ายเลขานุการโครงการ (ต้องใช้ PIN ฝ่ายเลขานุการโครงการ)</label>
-            <div class="field full hide" id="regPinBox"><label>PIN ฝ่ายเลขานุการโครงการ</label><input class="inp" type="password" name="staffPin" autocomplete="off"></div>
-          </div>
-          <button class="btn primary block" type="submit" id="regGo" style="margin-top:16px">ส่งคำขอสมัคร</button>
-        </form>
-      </div>
-    </div>
-  </div>
+<!-- ===== Phoenix: ส่วนเสริม (วางก่อน </body> หลังสคริปต์ App / Portal / AttReport) ===== -->
+<!-- 1) LeaveAttach — แนบใบรับรองแพทย์กับใบลา -->
+<style>
+  .lva-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .lva-row:empty { display: none; }
+  .lva-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .lva-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px;
+              border: 1px solid var(--outline-2, #e5e7eb); border-radius: 10px; }
+  .lva-item .lva-name { flex: 1; min-width: 140px; word-break: break-all; }
+  .lva-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; flex: none; }
+  .lva-viewer { margin-top: 12px; }
+  .lva-viewer img { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto 10px; border-radius: 8px; }
+  .lva-viewer .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+</style>
+<script>
+'use strict';
+/* Phoenix Workspace — LeaveAttach
+ * แนบใบรับรองแพทย์ / เอกสารประกอบกับ "ใบลาออนไลน์ทั้งใบ" (context LEAVE_REQ ใน 13_Attach.gs)
+ *   · ฟอร์มยื่นลา: ถ่ายรูปหรือเลือกไฟล์ได้ทันที ระบบย่อรูปก่อนส่ง แล้วอัปโหลดหลังบันทึกใบลาสำเร็จ
+ *   · ประวัติการลา (ผู้ปฏิบัติงานโครงการ) และหน้าจัดการใบลา (ฝ่ายเลขานุการโครงการ): ปุ่มแนบ/ดูเอกสาร + ป้าย "ยังไม่แนบใบรับรองแพทย์" สำหรับลาป่วย
+ *   · เปิดดูไฟล์ผ่าน apiAttachView เท่านั้น (ตรวจสิทธิ์ + บันทึก AuditLog) — ไม่มีลิงก์ Drive หลุดออกไป
+ * ไม่แก้ไฟล์เดิม: ต่อเข้ากับ RENDER.leave / RENDER.myleaves / RENDER.certify แบบเดียวกับที่ Portal ต่อ RENDER.person
+ * ต้องโหลดหลัง App และ Portal (Index.html: <?!= include('LeaveAttach'); ?> ต่อจาก include('AttReport'))
+ */
+API_FILE.apiAttachView = '13_Attach';
+API_FILE.apiAttachIndex = '13_Attach';
 
-  <header class="topbar no-print hide" id="topbar">
-    <div class="wrap">
-      <div class="brand"><div class="brand-mark">P</div>
-        <div>Phoenix<small id="orgName">ระบบการจัดการบุคลากรโครงการ</small></div></div>
-      <div class="nav-wrap" id="navWrap"><nav class="nav" id="nav">
-        <button data-page="home">ลงเวลา</button>
-        <button data-page="leave">ยื่นลา</button>
-        <button data-page="mymeet">ประชุม<span class="badge hide" id="mmBadge">0</span></button>
-        <button data-page="dash">Home</button>
-        <button data-page="clock">Attendance</button>
-        <button data-page="leave2">Leave<span class="badge hide" id="leaveBadge">0</span></button>
-        <button data-page="meet">Meetings<span class="badge hide" id="meetBadge">0</span></button>
-        <button data-page="report">Reports</button>
-        <button data-page="users">Users<span class="badge hide" id="userBadge">0</span></button>
-        <button data-page="system">Settings</button>
-      </nav></div>
-      <button class="btn station-btn hide" id="stationBtn" data-go="station">⌗ จุดลงเวลา</button>
-      <button class="btn user-chip" id="userBtn"><span class="avatar" id="userAvatar">?</span><span class="uname" id="userName">—</span></button>
-    </div>
-  </header>
+var LVA = {
+  idx: null, idxAt: 0, pending: null, off: false,   // off = เซิร์ฟเวอร์ยังไม่มีคำสั่งใหม่ → ซ่อนปุ่มทั้งหมด
+  staged: [], preparing: 0, urls: [],
+  MAX_FILES: 5, MAX_SIDE: 1600, JPEG_Q: 0.82, MAX_BYTES: 10 * 1024 * 1024, IDX_TTL: 60000
+};
+var LVA_OPEN = { PENDING: 1, CERTIFIED: 1 };            // สถานะใบลาที่ยังแนบไฟล์เพิ่มได้ (ตรงกับ ATTACH_REQ_OPEN ฝั่งเซิร์ฟเวอร์)
+var LVA_ACCEPT = 'image/*,' + ATTACH_ACCEPT;
 
-  <main class="wrap" id="main">
-    <div class="loading" id="loading"><div class="spin"></div><div>กำลังโหลดข้อมูล…</div></div>
+function lvaReq(id) { return (st.d.leaveReqs || []).filter(function (q) { return q.reqId === id; })[0] || null; }
+function lvaEnabled() { return !!String(S('DRIVE_ROOT_FOLDER_ID') || '').trim(); }
 
-    <!-- ================= ผู้ปฏิบัติงานโครงการ: ลงเวลา ================= -->
-    <section class="page" id="page-home">
-      <div class="grid g-home">
-        <div>
-          <!-- 1. ลงเวลาด้วยตนเอง — ช่องทางหลัก -->
-          <div class="card self-card hide" id="selfCard">
-            <div class="card-head"><div><h2>ลงเวลาด้วยตนเอง</h2>
-              <p class="sub" id="selfSub">บันทึกเวลาปฏิบัติงานประจำวัน · เวลาที่บันทึกใช้นาฬิกาของระบบ</p></div></div>
-            <div class="self-win" id="selfWin"></div>
-            <div class="self-actions">
-              <button class="btn primary" id="selfIn">ลงเวลามาปฏิบัติงาน</button>
-              <button class="btn" id="selfOut">ลงเวลากลับ</button>
-            </div>
-            <div class="self-res hide" id="selfRes"></div>
-            <div id="selfPre"></div>
-            <p class="muted small" style="margin:10px 0 0" id="selfGeoNote"></p>
-          </div>
-        </div>
-        <div>
-          <div class="dark today-panel" id="todayPanel"></div>
-        </div>
-      </div>
+// ------------------------------------------------------------------ เตรียมไฟล์ (ย่อรูป → JPEG)
+function lvaReadB64(f) {
+  return new Promise(function (res, rej) {
+    var r = new FileReader();
+    r.onload = function () { res(String(r.result).split(',')[1] || ''); };
+    r.onerror = function () { rej(new Error('อ่านไฟล์ไม่สำเร็จ')); };
+    r.readAsDataURL(f);
+  });
+}
+function lvaIsImage(f) { return /^image\//.test(f.type || '') || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name || ''); }
+/** วาดรูปลง canvas ด้านยาวไม่เกิน MAX_SIDE แล้วคืน dataURL แบบ JPEG · เบราว์เซอร์อ่านรูปนี้ไม่ได้ = null */
+function lvaCompress(f) {
+  return new Promise(function (res) {
+    var url;
+    try { url = URL.createObjectURL(f); } catch (e) { return res(null); }
+    var img = new Image();
+    img.onload = function () {
+      try {
+        var w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { URL.revokeObjectURL(url); return res(null); }
+        var s = Math.min(1, LVA.MAX_SIDE / Math.max(w, h));
+        var cv = document.createElement('canvas');
+        cv.width = Math.round(w * s); cv.height = Math.round(h * s);
+        var g = cv.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);      // PNG โปร่งใส → พื้นขาว
+        g.drawImage(img, 0, 0, cv.width, cv.height);
+        URL.revokeObjectURL(url);
+        res(cv.toDataURL('image/jpeg', LVA.JPEG_Q));
+      } catch (e) { URL.revokeObjectURL(url); res(null); }
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+}
+/** คืน { name, mime, b64, size } พร้อมส่ง — รูปถูกย่อเป็น JPEG ถ้าเล็กกว่าเดิมหรือไฟล์เดิมเป็นชนิดที่ระบบไม่รับ (เช่น HEIC) */
+function lvaPrepare(f) {
+  var ext = (String(f.name || '').split('.').pop() || '').toLowerCase();
+  var base = String(f.name || '').replace(/\.[^.]+$/, '') || 'ใบรับรองแพทย์';
+  var okExt = !!ATTACH_MIME_BY_EXT[ext];
+  return (lvaIsImage(f) ? lvaCompress(f) : Promise.resolve(null)).then(function (dataUrl) {
+    var b64 = dataUrl ? dataUrl.split(',')[1] || '' : '';
+    var size = b64 ? Math.floor(b64.length * 3 / 4) : 0;
+    if (b64 && (size < f.size || !okExt)) return { name: base + '.jpg', mime: 'image/jpeg', b64: b64, size: size };
+    if (!okExt) throw new Error(f.name + ': รองรับเฉพาะรูปภาพ / PDF / Word / Excel');
+    if (f.size > LVA.MAX_BYTES) throw new Error(f.name + ': ไฟล์ใหญ่เกิน 10MB');
+    return lvaReadB64(f).then(function (raw) {
+      return { name: f.name, mime: f.type || ATTACH_MIME_BY_EXT[ext], b64: raw, size: f.size };
+    });
+  });
+}
+function lvaUploadAll(reqId, files) {
+  var out = { ok: 0, fail: [] };
+  return files.reduce(function (p, s) {
+    return p.then(function () {
+      return call('apiAttachUpload', st.token, 'LEAVE_REQ', reqId, s.name, s.mime, s.b64)
+        .then(function () { out.ok++; }, function (e) { out.fail.push(s.name + ' — ' + ((e && e.message) || e)); });
+    });
+  }, Promise.resolve()).then(function () {
+    if (LVA.idx) LVA.idx[reqId] = (LVA.idx[reqId] || 0) + out.ok;
+    return out;
+  });
+}
 
-      <!-- 2. ประวัติการลงเวลา (ย้ายมาจากหน้า "การลงเวลา" หุบไว้) -->
-      <details class="card mt person-fold" id="homeTimeFold">
-        <summary>
-          <div><h2 id="mtTitle">ประวัติการลงเวลา</h2>
-            <p class="sub">เลือกเพื่อกางดูเวลามาปฏิบัติงานและเวลากลับ และการลงชื่อเข้าร่วมประชุม/อบรม</p></div>
-          <span class="fold-ic" aria-hidden="true">▾</span>
-        </summary>
-        <div style="margin-top:16px">
-          <div class="filters" style="margin-top:0;margin-bottom:16px">
-            <div class="field"><label>เดือน</label><select class="inp" id="mtMonth"></select></div>
-          </div>
-          <div class="grid g-kpi" id="mtKpis"></div>
-          <div class="tbl-wrap mt" id="mtTable"></div>
-          <div style="margin-top:24px">
-            <h3>ประชุม / อบรมที่ลงชื่อเข้าร่วม</h3>
-            <div class="tbl-wrap" id="mtEvents"></div>
-          </div>
-        </div>
-      </details>
+// ------------------------------------------------------------------ จำนวนไฟล์ต่อใบลา + ป้ายบนการ์ด
+function lvaLoadIdx(force) {
+  if (LVA.off) return Promise.resolve({});
+  if (LVA.idx && !force && Date.now() - LVA.idxAt < LVA.IDX_TTL) return Promise.resolve(LVA.idx);
+  if (LVA.pending) return LVA.pending;
+  LVA.pending = call('apiAttachIndex', st.token, 'LEAVE_REQ').then(function (m) {
+    LVA.idx = m || {}; LVA.idxAt = Date.now(); return LVA.idx;
+  }, function (e) {
+    if (e && e.code === 'NO_API') LVA.off = true;
+    else if (e && e.code === 'AUTH') handleErr(e);
+    return LVA.idx || {};
+  }).then(function (m) { LVA.pending = null; return m; });
+  return LVA.pending;
+}
+function lvaPaint() {
+  $$('[data-lva]').forEach(function (row) {
+    var id = row.getAttribute('data-lva'), q = lvaReq(id);
+    if (!q || LVA.off) { row.innerHTML = ''; return; }
+    var n = LVA.idx ? (LVA.idx[id] || 0) : null, open = !!LVA_OPEN[q.status];
+    var label = n ? '📎 เอกสารแนบ ' + n + ' ไฟล์'
+      : n === null ? (open ? '📎 เอกสารแนบ' : '')
+      : (open ? (q.type === 'SICK' ? '📎 แนบใบรับรองแพทย์' : '📎 แนบเอกสาร') : '');
+    var warn = q.type === 'SICK' && n === 0 && open ? pill('ยังไม่แนบใบรับรองแพทย์', 'warn') : '';
+    row.innerHTML = (label ? '<button class="btn sm" type="button" data-lva-open="' + esc(id) + '">' + label + '</button>' : '') + warn;
+  });
+}
 
-      <!-- 3. ช่องทางสำรอง: QR หน้าห้อง / รหัส 6 หลัก / QR ส่วนตัว (หุบไว้ — อยู่ใต้ประวัติการลงเวลา) -->
-      <details class="card mt person-fold" id="qrFold">
-        <summary>
-          <div><h2>ลงเวลาด้วย QR Code / รหัส 6 หลัก</h2>
-            <p class="sub">เลือกเพื่อกางออก สำหรับสแกนรหัส QR หน้าห้อง กรอกรหัส 6 หลัก หรือเปิด QR ส่วนตัว</p></div>
-          <span class="fold-ic" aria-hidden="true">▾</span>
-        </summary>
-        <div class="room-help" id="roomHelp" style="padding:18px 0 0">
-          <span class="eyebrow">สแกนรหัส QR ที่จอหน้าห้อง</span>
-          <p class="muted" style="margin-top:8px">เปิด<b>แอปพลิเคชันกล้อง</b>ของโทรศัพท์มือถือ สแกนรหัส QR บนจอของฝ่ายเลขานุการโครงการแล้วเลือกลิงก์ที่ปรากฏ ระบบจะบันทึกเวลาให้ทันที</p>
-          <div class="rh-pin">
-            <label for="homePin">หากสแกนไม่สำเร็จ กรุณากรอกรหัส 6 หลักใต้ QR</label>
-            <div class="row-flex"><input class="inp pin-inp" id="homePin" inputmode="numeric" maxlength="7" placeholder="000000" autocomplete="one-time-code"><button class="btn primary" id="homePinGo">ลงเวลา</button></div>
-          </div>
-          <button class="btn block ghost-btn" id="qrToggle">แสดง QR ส่วนตัว (สำรอง — ให้จุดลงเวลาสแกน)</button>
-        </div>
-        <div class="card qr-card hide" id="qrCard">
-          <div class="qr-head"><span class="eyebrow">QR ลงเวลาของฉัน</span><span class="small muted" id="qrClock">—</span></div>
-          <div class="qr-name" id="qrName">—</div>
-          <div class="muted small" id="qrSub"></div>
-          <div class="qr-box" id="qrBox"><div class="spin"></div></div>
-          <div class="qr-timer"><svg viewBox="0 0 36 36" class="ring"><circle cx="18" cy="18" r="15.5" class="ring-bg"></circle><circle cx="18" cy="18" r="15.5" class="ring-fg" id="qrRing"></circle></svg>
-            <span id="qrLeft">QR เปลี่ยนใน – วินาที</span></div>
-          <p class="muted small center" style="margin:6px 0 0">ยื่นหน้าจอนี้ให้จุดลงเวลาสแกน · แคปหน้าจอไปใช้ภายหลังไม่ได้</p>
-        </div>
-      </details>
-    </section>
+// ------------------------------------------------------------------ ฟอร์มยื่นลา: เลือกไฟล์ไว้ก่อน อัปโหลดหลังบันทึกใบลา
+function lvaHintText() {
+  var t = lvSelType();
+  return t === 'SICK'
+    ? 'ลาป่วย: ถ่ายรูปใบรับรองแพทย์แนบได้เลย ถ้ายังไม่ได้ใบรับรอง แนบภายหลังได้ที่ "ประวัติการลา"'
+    : 'แนบได้ทั้งรูปถ่ายและไฟล์ PDF / Word / Excel · รูปจะถูกย่อให้เล็กลงก่อนส่ง · แนบภายหลังได้ที่ "ประวัติการลา"';
+}
+function lvaFormMount() {
+  var root = $('#lvF'); if (!root || $('#lvaFormBox')) return;
+  var urlField = ($('[name=attachUrl]', root) || {}).closest ? $('[name=attachUrl]', root).closest('.field') : null;
+  var html = '<div class="field full" id="lvaFormBox"><label>แนบรูป / ไฟล์ใบรับรองแพทย์ <span class="muted">(ถ้ามี)</span></label>' +
+    (lvaEnabled()
+      ? '<div class="lva-list" id="lvaStaged"></div>' +
+        '<div class="lva-row"><label class="btn sm">📷 ถ่ายรูป / เลือกไฟล์<input type="file" id="lvaFormPick" accept="' + LVA_ACCEPT + '" multiple hidden></label>' +
+        '<span class="muted small" id="lvaHint"></span></div>'
+      : '<div class="muted small">ยังไม่ได้เปิดใช้การแนบไฟล์ — ฝ่ายเลขานุการโครงการตั้งโฟลเดอร์ Google Drive ได้ที่หน้าตั้งค่า · ระหว่างนี้วางลิงก์เอกสารในช่องด้านบนได้</div>') +
+    '</div>';
+  if (urlField) urlField.insertAdjacentHTML('afterend', html);
+  else root.insertAdjacentHTML('beforeend', html);
+  lvaStagedPaint();
+  var hint = $('#lvaHint'); if (hint) hint.textContent = lvaHintText();
+  root.addEventListener('change', function () { var h = $('#lvaHint'); if (h) h.textContent = lvaHintText(); });
+  var go = $('#lvGo'); if (go) go.onclick = lvaSubmit;
+}
+function lvaStagedPaint() {
+  var el = $('#lvaStaged'); if (!el) return;
+  el.innerHTML = LVA.staged.map(function (s, i) {
+    return '<div class="lva-item">' +
+      (/^image\//.test(s.mime) ? '<img class="lva-thumb" alt="" src="data:' + esc(s.mime) + ';base64,' + s.b64 + '">' : '<span>📄</span>') +
+      '<span class="lva-name">' + esc(s.name) + '</span><span class="muted small">' + fileSizeTxt(s.size) + '</span>' +
+      '<button class="btn sm icon" type="button" data-lva-unstage="' + i + '" title="นำออก">✕</button></div>';
+  }).join('') + (LVA.preparing ? '<div class="muted small">กำลังเตรียมไฟล์ ' + LVA.preparing + ' ไฟล์…</div>' : '');
+}
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'lvaFormPick') return;
+  var files = Array.prototype.slice.call(e.target.files || []); e.target.value = '';
+  var room = LVA.MAX_FILES - LVA.staged.length - LVA.preparing;
+  if (files.length > room) { toast('แนบได้ไม่เกิน ' + LVA.MAX_FILES + ' ไฟล์ต่อใบลา', true); files = files.slice(0, Math.max(0, room)); }
+  files.forEach(function (f) {
+    LVA.preparing++; lvaStagedPaint();
+    lvaPrepare(f).then(function (s) { LVA.staged.push(s); }, function (er) { toast(er.message, true); })
+      .then(function () { LVA.preparing--; lvaStagedPaint(); });
+  });
+});
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-lva-unstage]'); if (!b) return;
+  LVA.staged.splice(+b.getAttribute('data-lva-unstage'), 1); lvaStagedPaint();
+});
+/** เหมือน lvSubmit ใน Portal ทุกอย่าง + อัปโหลดไฟล์ที่เลือกไว้เมื่อได้เลขใบลาแล้ว */
+function lvaSubmit() {
+  var f = lvRead(), b = $('#lvGo');
+  if (!f.dateFrom) return toast('กรุณาระบุช่วงวันที่', true);
+  if (lvNeedNote(f.type) && !f.reason) return toast('กรุณาระบุหมายเหตุ', true);
+  if (LVA.preparing) return toast('กำลังเตรียมไฟล์แนบ รอสักครู่แล้วกดบันทึกอีกครั้ง', true);
+  if (!lvNeedNote(f.type)) f.reason = '';
+  var files = LVA.staged.slice(), reqId = '';
+  b.disabled = true; b.textContent = 'กำลังบันทึก…';
+  call('apiSubmitLeave', st.token, f).then(function (res) {
+    var q = res.req || res;
+    reqId = q.reqId;
+    st.d.leaveReqs.push(q);
+    (res.records || []).forEach(function (r) { st.d.records.push(r); });
+    st.leaveDraft = null;
+    buildIndex(); updateBadges();
+    if (!files.length) return { ok: 0, fail: [] };
+    b.textContent = 'กำลังแนบไฟล์ ' + files.length + ' ไฟล์…';
+    return lvaUploadAll(reqId, files);
+  }).then(function (u) {
+    if (!reqId) return;
+    LVA.staged = [];
+    var msg = 'บันทึกข้อมูลเรียบร้อยแล้ว (' + reqId + ')' + (u.ok ? ' · แนบไฟล์ ' + u.ok + ' ไฟล์' : '');
+    if (u.fail.length) toast(msg + ' · แนบไม่สำเร็จ ' + u.fail.length + ' ไฟล์ — แนบใหม่ได้ที่ประวัติการลา', true);
+    else toast(msg);
+    RENDER.leave();
+    var fold = $('#leaveHistoryFold'); if (fold) fold.open = true;
+  }).catch(handleErr).then(function () {
+    var bb = $('#lvGo'); if (bb) { bb.disabled = false; bb.textContent = 'บันทึกข้อมูล'; }
+  });
+}
 
-    <!-- ================= ผลการสแกนรหัส QR หน้าห้อง (?p=ci) ================= -->
-    <section class="page" id="page-ci">
-      <div class="ci-wrap">
-        <div class="card ci-card" id="ciCard"></div>
-        <div class="card hide" id="ciPin">
-          <h2 style="font-size:18px">กรอกรหัส 6 หลักแทน</h2>
-          <p class="sub">ดูรหัสใต้ QR บนจอหน้าห้อง — รหัสเปลี่ยนทุก 1 นาที</p>
-          <div class="row-flex"><input class="inp pin-inp" id="ciPinInp" inputmode="numeric" maxlength="7" placeholder="000000" autocomplete="one-time-code"><button class="btn primary" id="ciPinGo">ลงเวลา</button></div>
-        </div>
-      </div>
-    </section>
+// ------------------------------------------------------------------ หน้าต่างเอกสารของใบลา (เจ้าของ + ฝ่ายเลขานุการโครงการ)
+function lvaRevokeUrls() { LVA.urls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* - */ } }); LVA.urls = []; }
+function lvaOpen(reqId) {
+  var q = lvaReq(reqId); if (!q) return;
+  lvaRevokeUrls();
+  var open = !!LVA_OPEN[q.status], p = IX.people[q.personId] || {};
+  openModal('<h3>เอกสารประกอบใบลา ' + esc(reqId) + '</h3>' +
+    '<p class="muted small">' + esc((isStaff() ? (p.fullName || '') + ' · ' : '') + tlabel(q.type) + ' · ' + lvWhen(q)) + '</p>' +
+    '<p class="muted small">เปิดดูได้เฉพาะเจ้าของใบลาและฝ่ายเลขานุการโครงการ · ระบบบันทึกทุกครั้งที่เปิดไฟล์</p>' +
+    '<div class="lva-list" id="lvaList"><div class="muted small">กำลังโหลด…</div></div>' +
+    (open
+      ? '<div class="lva-row" style="margin-top:12px"><label class="btn sm primary">📷 ถ่ายรูป / เลือกไฟล์<input type="file" id="lvaPick" accept="' + LVA_ACCEPT + '" multiple hidden></label>' +
+        '<span class="muted small" id="lvaPickNote">รูปจะถูกย่อให้เล็กลงก่อนส่ง · ไม่เกิน 10MB ต่อไฟล์</span></div>'
+      : '<div class="note small" style="margin-top:12px">ใบลานี้ถูกยกเลิกหรือเพิกถอนแล้ว แนบไฟล์เพิ่มไม่ได้</div>') +
+    '<div class="lva-viewer" id="lvaViewer"></div>' +
+    '<div class="actions"><button class="btn" data-close>ปิด</button></div>');
+  $('#modal').setAttribute('data-lva-req', reqId);
+  lvaListLoad(reqId);
+}
+function lvaListLoad(reqId) {
+  var q = lvaReq(reqId), open = q && LVA_OPEN[q.status];
+  return call('apiAttachList', st.token, 'LEAVE_REQ', reqId).then(function (list) {
+    if (LVA.idx) { LVA.idx[reqId] = list.length; lvaPaint(); }
+    var el = $('#lvaList'); if (!el) return;
+    el.innerHTML = list.length ? list.map(function (a) {
+      return '<div class="lva-item"><span>' + (/^image\//.test(a.mimeType || '') ? '🖼️' : '📄') + '</span>' +
+        '<span class="lva-name">' + esc(a.fileName) + '<div class="muted small">' + fileSizeTxt(a.size) + ' · ' + esc(a.uploadedBy || '') +
+        (a.uploadedAt ? ' · ' + thDate(String(a.uploadedAt).slice(0, 10)) + ' ' + esc(String(a.uploadedAt).slice(11, 16)) : '') + '</div></span>' +
+        '<button class="btn sm" type="button" data-lva-view="' + esc(a.attachId) + '">เปิดดู</button>' +
+        (open ? '<button class="btn sm icon" type="button" data-lva-del="' + esc(a.attachId) + '" title="ลบไฟล์">✕</button>' : '') + '</div>';
+    }).join('') : '<div class="muted small">ยังไม่มีไฟล์แนบ</div>';
+  }).catch(function (e) {
+    var el = $('#lvaList');
+    if (el) el.innerHTML = '<div class="muted small">' + esc(e.code === 'NO_API' ? 'ยังไม่ได้อัปเดตไฟล์ 13_Attach ในระบบ' : e.message) + '</div>';
+    if (e.code === 'AUTH') handleErr(e);
+  });
+}
+function lvaView(attachId, btn) {
+  var box = $('#lvaViewer'); if (!box) return;
+  btn.disabled = true; box.innerHTML = '<div class="muted small">กำลังเปิดไฟล์…</div>';
+  call('apiAttachView', st.token, attachId).then(function (r) {
+    var bin = atob(r.b64 || ''), arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    var url = URL.createObjectURL(new Blob([arr], { type: r.mimeType || 'application/octet-stream' }));
+    LVA.urls.push(url);
+    var img = /^image\//.test(r.mimeType || '');
+    box.innerHTML = (img ? '<img alt="' + esc(r.fileName) + '" src="' + url + '">' : '') +
+      '<div class="row"><a class="btn sm" href="' + url + '" target="_blank" rel="noopener">เปิดในแท็บใหม่</a>' +
+      '<a class="btn sm" href="' + url + '" download="' + esc(r.fileName) + '">บันทึกไฟล์</a></div>';
+  }).catch(function (e) { box.innerHTML = ''; handleErr(e); })
+    .then(function () { btn.disabled = false; });
+}
+document.addEventListener('click', function (e) {
+  var o = e.target.closest('[data-lva-open]');
+  if (o) { lvaOpen(o.getAttribute('data-lva-open')); return; }
+  var v = e.target.closest('[data-lva-view]');
+  if (v) { lvaView(v.getAttribute('data-lva-view'), v); return; }
+  var d = e.target.closest('[data-lva-del]');
+  if (d) {
+    var reqId = $('#modal').getAttribute('data-lva-req');
+    if (!confirm('ลบไฟล์แนบนี้?')) return;
+    d.disabled = true;
+    call('apiAttachDelete', st.token, d.getAttribute('data-lva-del'))
+      .then(function () { toast('ลบไฟล์แนบแล้ว'); $('#lvaViewer').innerHTML = ''; return lvaListLoad(reqId); })
+      .catch(function (er) { d.disabled = false; handleErr(er); });
+  }
+});
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'lvaPick') return;
+  var reqId = $('#modal').getAttribute('data-lva-req');
+  var files = Array.prototype.slice.call(e.target.files || []).slice(0, LVA.MAX_FILES); e.target.value = '';
+  if (!files.length || !reqId) return;
+  var note = $('#lvaPickNote'), pick = e.target.closest('label');
+  if (pick) pick.classList.add('disabled');
+  if (note) note.textContent = 'กำลังเตรียมและอัปโหลด ' + files.length + ' ไฟล์…';
+  var ready = [], bad = [];
+  Promise.all(files.map(function (f) {
+    return lvaPrepare(f).then(function (s) { ready.push(s); }, function (er) { bad.push(er.message); });
+  })).then(function () { return ready.length ? lvaUploadAll(reqId, ready) : { ok: 0, fail: [] }; })
+    .then(function (u) {
+      var fails = bad.concat(u.fail);
+      toast((u.ok ? 'แนบไฟล์แล้ว ' + u.ok + ' ไฟล์' : 'ยังไม่ได้แนบไฟล์') + (fails.length ? ' · ไม่สำเร็จ: ' + fails.join(' | ') : ''), !!fails.length);
+      return lvaListLoad(reqId);
+    })
+    .catch(handleErr)
+    .then(function () {
+      if (pick) pick.classList.remove('disabled');
+      var n = $('#lvaPickNote'); if (n) n.textContent = 'รูปจะถูกย่อให้เล็กลงก่อนส่ง · ไม่เกิน 10MB ต่อไฟล์';
+    });
+});
+// คืนหน่วยความจำของไฟล์ที่เปิดดูเมื่อปิดหน้าต่าง
+$('#modalBg').addEventListener('click', function (e) {
+  if (e.target === this || e.target.closest('[data-close]')) { lvaRevokeUrls(); $('#modal').removeAttribute('data-lva-req'); }
+});
 
-    <!-- ================= ผู้ปฏิบัติงานโครงการ: การลา ================= -->
-    <section class="page" id="page-leave">
-      <div class="hero">
-        <span class="eyebrow">การแจ้งลาและการปฏิบัติงาน</span>
-        <h1>แบบฟอร์มการแจ้งลาและปฏิบัติงานนอกโครงการ Phoenix</h1>
-      </div>
-      <div class="card"><div id="leaveForm"></div></div>
-      <div class="card mt"><div class="note" id="leaveRules"></div></div>
+// ------------------------------------------------------------------ ต่อเข้ากับหน้าที่มีอยู่
+(function () {
+  // ฟอร์มยื่นลา
+  var baseLeave = RENDER.leave;
+  RENDER.leave = function () { baseLeave.apply(this, arguments); lvaFormMount(); };
 
-      <!-- ประวัติการลา (ย้ายมาจากหน้า "ใบลาของฉัน" หุบไว้) -->
-      <details class="card mt person-fold" id="leaveHistoryFold">
-        <summary>
-          <div><h2>ประวัติการลา</h2><p class="sub">เลือกเพื่อกางดูรายการที่บันทึกไว้ทั้งหมดของท่าน</p></div>
-          <span class="fold-ic" aria-hidden="true">▾</span>
-        </summary>
-        <div style="margin-top:16px"><div id="myLeaveList" class="check-list"></div></div>
-      </details>
-    </section>
+  // ประวัติการลาของผู้ปฏิบัติงานโครงการ — การ์ดเรียงตาม submittedAt ใหม่ → เก่า เหมือน Portal
+  var baseMy = RENDER.myleaves;
+  RENDER.myleaves = function () {
+    baseMy.apply(this, arguments);
+    var list = (st.d.leaveReqs || []).slice().sort(function (a, b) { return a.submittedAt < b.submittedAt ? 1 : -1; });
+    $$('#myLeaveList .lv-card').forEach(function (card, i) {
+      var q = list[i], foot = card.querySelector('.lv-foot');
+      if (!q || !foot || card.querySelector('[data-lva]') || card.textContent.indexOf(q.reqId) === -1) return;
+      var row = document.createElement('div'); row.className = 'lva-row'; row.setAttribute('data-lva', q.reqId);
+      foot.parentNode.insertBefore(row, foot);
+    });
+    lvaPaint(); lvaLoadIdx().then(lvaPaint);
+  };
 
-    <!-- คงส่วนว่างไว้กันการอ้างอิง DOM จากโค้ดเดิม -->
-    <section class="page hide" id="page-myleaves"></section>
-    <section class="page hide" id="page-mytime"></section>
+  // หน้าจัดการใบลาของฝ่ายเลขานุการโครงการ — การ์ดมี id="cq-<reqId>"
+  var baseCert = RENDER.certify;
+  RENDER.certify = function () {
+    baseCert.apply(this, arguments);
+    $$('#certList [id^="cq-"]').forEach(function (card) {
+      var info = card.firstElementChild;
+      if (!info || info.querySelector('[data-lva]')) return;
+      var row = document.createElement('div'); row.className = 'lva-row'; row.setAttribute('data-lva', card.id.slice(3));
+      info.appendChild(row);
+    });
+    lvaPaint(); lvaLoadIdx().then(lvaPaint);
+  };
+})();
+</script>
+<!-- 2) Roster — ตารางวันมาปฏิบัติงานของคนที่มาแค่บางวัน -->
+<style>
+  .ros-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0 0; }
+  .ros-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 12px; }
+  .ros-head .ros-month { font-weight: 700; min-width: 140px; text-align: center; }
+  .ros-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--outline-2, #e5e7eb); border-radius: 10px; }
+  .ros-grid { border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  .ros-grid th, .ros-grid td { padding: 0; text-align: center; border-bottom: 1px solid var(--outline-2, #e5e7eb); }
+  .ros-grid thead th { position: sticky; top: 0; background: var(--surface, #fff); z-index: 1; padding: 4px 0; min-width: 30px; }
+  .ros-grid th.pn, .ros-grid td.pn { position: sticky; left: 0; background: var(--surface, #fff); text-align: left; padding: 6px 10px;
+                                     min-width: 170px; max-width: 220px; z-index: 2; }
+  .ros-grid thead th.pn { z-index: 3; }
+  .ros-grid .we { color: var(--critical, #c0392b); }
+  .ros-grid .hol { background: repeating-linear-gradient(135deg, var(--outline-2, #eee) 0 3px, transparent 3px 6px); }
+  .ros-cell { width: 28px; height: 28px; margin: 2px; border-radius: 6px; border: 1px solid var(--outline, #d1d5db);
+              background: transparent; cursor: pointer; font: inherit; color: inherit; }
+  .ros-cell.on { background: var(--primary, #2a78d6); border-color: var(--primary, #2a78d6); color: #fff; }
+  .ros-cell:disabled { cursor: default; opacity: .5; }
+  .ros-sub { display: block; font-size: 11px; }
+  .ros-dirty { color: var(--warn, #b45309); }
+</style>
+<script>
+'use strict';
+/* Phoenix Workspace — Roster
+ * ตารางวันมาปฏิบัติงานรายเดือนของผู้ปฏิบัติงานโครงการที่มาแค่บางวัน (17_Roster.gs)
+ *   · ทำให้การนับวันทำการรู้ว่ากำลังคิดให้ใคร: isWorkday(d) ดูตารางของ "คนที่กำลังคำนวณอยู่" (WCP.cur)
+ *     โดยครอบ dayStatus / attStats / capMin / offDutyDays_ / workdays / wcLeaveDates / lvPreview และแทน aggregate
+ *   · หน้าต่างกรอกตาราง (ฝ่ายเลขานุการโครงการ) เปิดจากหน้า ผู้ใช้ และจากงานค้างบนหน้าภาพรวม
+ *   · กติกาเดียวกับฝั่งเซิร์ฟเวอร์ (17_Roster.gs) — แก้ที่หนึ่งต้องแก้อีกที่ด้วย
+ * ต้องโหลดหลัง App และ Portal (Index.html: <?!= include('Roster'); ?> ต่อท้ายรายการ include)
+ */
+API_FILE.apiRosterGet = '17_Roster';
+API_FILE.apiRosterSave = '17_Roster';
+API_FILE.apiRosterMode = '17_Roster';
 
-    <!-- ================= ประชุมภายในโครงการ (ผู้ปฏิบัติงานโครงการบันทึกเอง) ================= -->
-    <section class="page" id="page-mymeet">
-      <div class="hero">
-        <span class="eyebrow">การประชุมภายในโครงการ</span>
-        <h1>แบบฟอร์มบันทึกการประชุม</h1>
-      </div>
-      <div class="card"><div id="mmFormBox"></div></div>
+var ROS = { mode: {}, days: {}, at: 0, off: false, pending: null, TTL: 5 * 60000 };
+var WCP = { cur: null };          // คนที่กำลังคำนวณวันทำการให้อยู่ (null = ใช้รอบโครงการ)
 
-      <!-- ประวัติการประชุม (หุบไว้) -->
-      <details class="card mt person-fold" id="meetHistoryFold">
-        <summary>
-          <div><h2>ประวัติการประชุม</h2><p class="sub">เลือกเพื่อกางดูสรุปเวลาประชุมและรายการประชุมของท่าน</p></div>
-          <span class="fold-ic" aria-hidden="true">▾</span>
-        </summary>
-        <div style="margin-top:16px">
-          <div class="filters" style="margin-top:0;margin-bottom:16px">
-            <div class="field"><label>แสดง</label><select class="inp" id="mmFilter">
-              <option value="all">ทั้งหมด</option><option value="CERTIFIED">บันทึกแล้ว</option>
-              <option value="mine">วงที่ฉันสร้าง</option></select></div>
-          </div>
-          <div class="grid g-kpi" id="mmKpis"></div>
-          <div class="tbl-wrap mt" id="mmList"></div>
-        </div>
-      </details>
-    </section>
+// ------------------------------------------------------------------ กติกาวันทำการรายคน
+function rosOn(p, d) {
+  if (!p || ROS.off) return false;
+  var since = ROS.mode[p.personId];
+  return since !== undefined && (!since || String(d).slice(0, 7) >= since);
+}
+function rosMonth(p, d) { var m = ROS.days[p.personId]; return m ? m[String(d).slice(0, 7)] || null : null; }
+function rosActive(p, d) {
+  var k = p.personId + '|' + d;
+  if (IX.att && IX.att[k]) return true;
+  if (IX.dayRec) return !!(IX.dayRec[k] && IX.dayRec[k].length);
+  return (IX.recByP && IX.recByP[p.personId] || []).some(function (r) { return r.date === d; });
+}
+/** เดือนที่มีตาราง = วันในตาราง (ยกเว้นช่วงยกเว้น) · ยังไม่มีตาราง = เฉพาะวันที่มาหรือมีรายการลา */
+function rosWorkday(p, d) {
+  var set = rosMonth(p, d);
+  return set ? !!set[d] && !wcExcluded(d) : rosActive(p, d) && !wcExcluded(d);
+}
+/** วันลาที่หักชั่วโมงได้ — เดือนที่ยังไม่มีตารางใช้รอบโครงการไปก่อน (ตรงกับ rosLeaveDay_ ฝั่งเซิร์ฟเวอร์) */
+function rosLeaveDay(p, d) {
+  if (!rosOn(p, d)) return ROS_BASE.isWorkday(d);
+  var set = rosMonth(p, d);
+  return set ? !!set[d] && !wcExcluded(d) : ROS_BASE.isWorkday(d);
+}
 
-    <!-- ================= บัญชีของฉัน ================= -->
-    <section class="page" id="page-account">
-      <div class="hero"><span class="eyebrow">บัญชีของฉัน</span><h1 id="accTitle">—</h1><p class="lead" id="accLead"></p></div>
-      <div class="grid g-2">
-        <div class="card"><h2>ข้อมูลติดต่อ</h2><p class="sub">อีเมลสำหรับรับแจ้งผลการพิจารณาใบลา</p><div id="accForm"></div></div>
-        <div class="card"><h2>เปลี่ยนรหัสผ่าน</h2><p class="sub">ต้องมีทั้งตัวอักษรและตัวเลข รวมกันอย่างน้อย 8 หลัก ตามมาตรฐาน HIA</p>
-          <div class="form-grid">
-            <div class="field full"><label>รหัสผ่านเดิม</label><input class="inp" type="password" id="pwOld" autocomplete="current-password"></div>
-            <div class="field"><label>รหัสผ่านใหม่</label><input class="inp" type="password" id="pwNew" autocomplete="new-password"><small class="fhint" id="pwHint"></small></div>
-            <div class="field"><label>ยืนยันรหัสผ่านใหม่</label><input class="inp" type="password" id="pwNew2" autocomplete="new-password"></div>
-          </div>
-          <div class="actions-row"><button class="btn primary" id="pwGo">บันทึกรหัสผ่านใหม่</button></div>
-        </div>
-      </div>
-      <div class="card mt no-print"><div class="card-head"><div><h2>ตำแหน่งแถบเมนู</h2>
-        <p class="sub">เลือกตำแหน่งแถบเมนูด้านบน ด้านซ้าย หรือด้านขวา · ระบบจะบันทึกค่านี้ไว้เฉพาะเครื่องนี้ · กรณีหน้าจอแคบกว่า 990 พิกเซล ระบบจะใช้แถบด้านบนเสมอ</p></div></div>
-        <div class="seg nav-pos" id="navPosSeg"><button data-np="top">▭ ด้านบน</button><button data-np="left">◧ ด้านซ้าย</button><button data-np="right">◨ ด้านขวา</button></div>
-      </div>
-      <div class="support no-print"><div><h3>ออกจากระบบ</h3><p>กรณีใช้เครื่องส่วนกลาง กรุณาออกจากระบบทุกครั้งหลังเลิกใช้งาน</p></div><button class="btn" id="logoutBtn">ออกจากระบบ</button></div>
-    </section>
+var ROS_BASE = {};
+/** ครอบฟังก์ชันเดิมให้ตั้ง WCP.cur = คนที่ส่งเข้ามา (อาร์กิวเมนต์แรก) ระหว่างคำนวณ */
+function rosWrapPerson(name) {
+  var base = window[name];
+  if (typeof base !== 'function') return;
+  ROS_BASE[name] = base;
+  window[name] = function (p) {
+    var prev = WCP.cur; WCP.cur = p || null;
+    try { return base.apply(this, arguments); } finally { WCP.cur = prev; }
+  };
+}
+(function () {
+  ROS_BASE.isWorkday = isWorkday;
+  window.isWorkday = function (d) { var p = WCP.cur; return rosOn(p, d) ? rosWorkday(p, d) : ROS_BASE.isWorkday(d); };
 
-    <!-- ================= จุดลงเวลา (สแกนรหัส QR) ================= -->
-    <section class="page" id="page-station">
-      <div class="seg st-tabs no-print" id="stTabs"><button data-st="room" class="on">QR หน้าห้อง · สแกนด้วยโทรศัพท์มือถือ</button><button data-st="scan">สแกนรหัส QR บุคคล (สำรอง)</button></div>
-      <div class="station">
-        <div class="dark scan-panel" id="scanPanel">
-          <div class="scan-top">
-            <span class="eyebrow">จุดลงเวลา</span>
-            <div class="seg seg-dark" id="stMode"><button data-mode="DAY" class="on">ลงเวลาปฏิบัติงาน</button><button data-mode="EVENT">ลงชื่อเข้าร่วมประชุม/อบรม</button></div>
-          </div>
-          <div class="field hide" id="stEventBox" style="margin-top:12px"><label style="color:#cbd5e1">ประชุม / อบรม</label>
-            <div class="row-flex"><select class="inp" id="stEvent"></select><button class="btn sm on-dark editor-only hide" id="stEventAdd">+ รอบใหม่</button></div></div>
-          <!-- QR หน้าห้อง -->
-          <div id="roomBox"></div>
-          <!-- สแกนรหัส QR บุคคล (ทางสำรอง) -->
-          <div id="scanBox" class="hide">
-          <div class="cam" id="cam">
-            <video id="camVideo" playsinline muted></video>
-            <div class="cam-frame"></div>
-            <div class="cam-idle" id="camIdle"><button class="btn primary" id="camStart">เปิดกล้องสแกน</button>
-              <p class="small">หรือใช้เครื่องสแกนบาร์โค้ด หรือแอปพลิเคชันกล้องของเครื่องนี้สแกน</p></div>
-          </div>
-          <div class="row-flex" style="margin-top:12px">
-            <input class="inp" id="scanInput" placeholder="ช่องรับเครื่องสแกน (คลิกที่นี่แล้วสแกน)" autocomplete="off">
-            <button class="btn on-dark" id="camStop">ปิดกล้อง</button>
-          </div>
-          <div class="scan-result idle" id="scanResult"><div class="sr-name">พร้อมอ่านรหัส</div><div class="sr-msg">ให้ผู้ปฏิบัติงานโครงการเปิด "QR ส่วนตัว (สำรอง)" แล้วยื่นหน้าจอมาที่กล้อง</div></div>
-          </div>
-        </div>
-        <div>
-          <div class="grid g-3" id="stKpis"></div>
-          <div class="card mt"><div class="card-head"><div><h2 id="stListTitle">สแกนล่าสุดวันนี้</h2><p class="sub" id="stListSub"></p></div>
-            <button class="btn sm editor-only hide" id="stManual">ลงเวลาแทน</button></div>
-            <div id="stList" class="scan-list"></div></div>
-          <div class="card mt"><h2>ยังไม่ได้ลงเวลา</h2><p class="sub">ไม่นับบุคลากรที่มีรายการลาเต็มวันในวันนี้</p><div id="stMissing" class="chips-light"></div></div>
-        </div>
-      </div>
-    </section>
+  ROS_BASE.workdays = workdays;          // ตัวเดิมจำผลตามช่วงวันที่ — ใช้ได้เฉพาะรอบโครงการ
+  window.workdays = function (from, to) {
+    var p = WCP.cur;
+    if (!p || ROS.off || ROS.mode[p.personId] === undefined) return ROS_BASE.workdays(from, to);
+    var n = 0;
+    for (var d = from; d <= to; d = addDays(d, 1)) if (isWorkday(d)) n++;
+    return n;
+  };
 
-    <!-- ================= ฝ่ายเลขานุการโครงการ: ลงเวลา ================= -->
-    <section class="page" id="page-clock">
-      <div class="hero no-print">
-        <span class="eyebrow">การลงเวลา</span>
-        <h1 id="clkTitle">ลงเวลาประจำวัน</h1>
-        <p class="lead">ข้อมูลจากการสแกนรหัส QR เฉพาะตัว · สามารถแก้ไขหรือบันทึกเวลาแทนได้ โดยต้องระบุเหตุผล และระบบจะจัดเก็บประวัติการแก้ไขไว้</p>
-        <div class="tabs" style="margin-top:18px">
-          <div class="seg" id="clkTabs">
-            <button data-ct="daily" class="on">วันนี้</button>
-            <button data-ct="geo">ติดตามการลงเวลานอกพื้นที่ (GPS)</button>
-            <button data-ct="log">บันทึกการลงเวลารายวัน</button>
-            <button data-ct="gps">ตำแหน่ง GPS</button>
-            <button data-ct="rep">ออกรายงาน</button>
-          </div>
-        </div>
-      </div>
-      <!-- แถบตัวกรองร่วมของ 3 แท็บใหม่ (สร้างโดย AttReport.html) -->
-      <div id="arBar" class="no-print hide"></div>
-      <div id="clkTabDaily">
-        <div class="filters" style="margin-top:0">
-          <div class="field"><label>วันที่</label><input class="inp" type="date" id="clkDate"></div>
-          <div class="field"><label>ทีม</label><select class="inp" id="clkTeam"></select></div>
-          <div class="field" style="flex:1;min-width:180px"><label>ค้นหา</label><input class="inp" id="clkQ" placeholder="ชื่อ / หอผู้ป่วย"></div>
-          <button class="btn primary" data-go="station">⌗ เปิดจุดลงเวลา</button>
-        </div>
-        <div class="grid g-kpi5" id="clkKpis"></div>
-        <div class="card mt"><div class="tbl-wrap" id="clkTable"></div></div>
-        <div class="card mt">
-          <div class="card-head"><div><h2>สรุปการลงเวลารายบุคคล</h2><p class="sub" id="clkSumSub">รายเดือน / รายไตรมาส / รายปีงบประมาณ</p></div></div>
-          <div class="filters" data-filters style="margin-top:0;margin-bottom:16px"></div>
-          <div class="tbl-wrap" id="clkSummary"></div>
-        </div>
-      </div>
-      <div id="clkTabGeo" class="hide">
-        <p class="lead" style="margin-top:0">สรุปการลงเวลาด้วยตนเองนอกพิกัดที่กำหนด (จากฟิลด์ตรวจพิกัดตอนลงชื่อ) เพื่อให้ฝ่ายเลขานุการโครงการติดตามและพูดคุยกับผู้ที่ลงเวลานอกพื้นที่ที่กำหนดบ่อย ๆ หรือมาหลังเวลาที่กำหนด · ไม่แสดงผลนี้ให้ผู้ปฏิบัติงานโครงการเห็น</p>
-        <div class="filters" data-filters style="margin-top:0"></div>
-        <div class="grid g-3" id="geoKpis"></div>
-        <div class="card mt"><div class="tbl-wrap" id="geoTable"></div></div>
-      </div>
-      <!-- ===== บันทึกการลงเวลารายวัน ===== -->
-      <div id="arTabLog" class="hide">
-        <div class="chips" id="arLogChips"></div>
-        <div class="card mt"><div class="tbl-wrap" id="arLogTable"></div></div>
-      </div>
-      <!-- ===== ตำแหน่ง GPS ===== -->
-      <div id="arTabGps" class="hide">
-        <div class="chips" id="arGpsChips"></div>
-        <div class="card mt ar-map-card">
-          <div class="card-head"><div><h2>แผนที่ตำแหน่งลงชื่อ</h2><p class="sub" id="arMapSub"></p></div>
-            <div class="ar-legend"><span><i style="background:#16a34a"></i>อยู่ในพื้นที่ที่กำหนด</span><span><i style="background:#eda100"></i>ตำแหน่งไม่แน่ชัด</span><span><i style="background:#d03b3b"></i>อยู่นอกพื้นที่ที่กำหนด</span><span><i class="ring"></i>รัศมีจุดอ้างอิง</span></div></div>
-          <div id="arMap"></div>
-        </div>
-        <div class="card mt"><div class="tbl-wrap" id="arGpsTable"></div></div>
-      </div>
-      <!-- ===== ออกรายงาน ===== -->
-      <div id="arTabRep" class="hide">
-        <div class="card no-print">
-          <div class="card-head"><div><h2>เลือกเนื้อหาในรายงาน</h2><p class="sub">เลือกเฉพาะหัวข้อที่ต้องการ · ระบบจำตัวเลือกไว้ในเครื่องนี้</p></div></div>
-          <div class="ar-secs" id="arSecs"></div>
-          <div class="filters" style="margin-top:16px">
-            <button class="btn primary" id="arPdf">พิมพ์ / บันทึก PDF</button>
-            <button class="btn" id="arXlsx">บันทึกไฟล์ Excel</button>
-          </div>
-        </div>
-        <div class="report mt" id="arDoc"></div>
-      </div>
-    </section>
+  ['dayStatus', 'attStats', 'capMin', 'offDutyDays_'].forEach(rosWrapPerson);
 
-    <!-- ================= ฝ่ายเลขานุการโครงการ: รับรองใบลา ================= -->
-    <section class="page" id="page-leave2">
-      <div class="hero">
-        <span class="eyebrow">การลาและการใช้ชั่วโมง</span>
-        <h1>จัดการการลาของผู้ปฏิบัติงานโครงการ</h1>
-        <p class="lead">รวมงานที่เคยแยกเป็นสามเมนู: ดูรายการที่บันทึกเข้ามา บันทึกแทนผู้ที่แจ้งทางอื่น และตรวจสอบยืนยันรายการ</p>
-        <div class="tabs" style="margin-top:18px">
-          <div class="seg" id="leaveTabs">
-            <button data-lt="cert" class="on">รายการที่บันทึกแล้ว</button>
-            <button data-lt="entry">บันทึกแทนผู้ปฏิบัติงานโครงการ</button>
-            <button data-lt="review">ตรวจสอบและยืนยัน</button>
-          </div>
-        </div>
-      </div>
-      <div id="leaveBody">
-        <div id="leaveTabCert">
-      <div class="hero">
-        <span class="eyebrow">รับรองใบลา</span>
-        <h1>ใบลาออนไลน์จากผู้ปฏิบัติงานโครงการ</h1>
-        <p class="lead">รายการที่ผู้ปฏิบัติงานโครงการบันทึกเข้ามาถูกบันทึกลงตารางการลาให้แล้วทันที · ตรวจสอบได้ที่นี่ กด <b>✉ ส่งอีเมลแจ้งหัวหน้า</b> เมื่อต้องการแจ้งหัวหน้าหน่วยงาน หรือ <b>เพิกถอน</b> หากไม่ถูกต้อง</p>
-        <div class="tabs" style="margin-top:18px" id="certTabs"></div>
-        <div class="filters" id="certFilters"></div>
-      </div>
-      <div id="certList" class="check-list"></div>
-    </div>
-        <div id="leaveTabEntry" class="hide">
-      <div class="hero">
-        <span class="eyebrow">บันทึกการลา / ใช้ชั่วโมง</span>
-        <h1>บันทึกรายการแทนผู้ปฏิบัติงานโครงการ</h1>
-        <p class="lead">สำหรับคำขอที่ได้รับผ่านช่องทางอื่น (LINE หรือโทรศัพท์) · สามารถเลือกช่วงวันได้ ระบบจะสร้างรายการ 1 รายการต่อวันทำการ และข้ามวันเสาร์-อาทิตย์และวันหยุดราชการโดยอัตโนมัติ</p>
-      </div>
-      <div class="grid g-main mt">
-        <div class="card"><div id="entryForm"></div></div>
-        <div class="card"><h2>บันทึกล่าสุด</h2><p class="sub">20 รายการล่าสุดจากหน้าเว็บ</p><div id="recentList"></div></div>
-      </div>
-    </div>
-        <div id="leaveTabReview" class="hide">
-      <div class="hero">
-        <span class="eyebrow">ตรวจสอบ &amp; ยืนยัน</span>
-        <h1>ตรวจสอบรายการและลงชื่อยืนยัน</h1>
-        <p class="lead">แยกประเภทการลาหยุดเป็น ลาป่วย / ลากิจ / Vacation · สามารถแก้ไขเวลาและเหตุผลได้ในหน้านี้ การยืนยันทุกครั้งระบบจะบันทึกชื่อผู้ตรวจสอบและเวลาไว้</p>
-        <div class="tabs" style="margin-top:18px" id="reviewTabs"></div>
-        <div class="filters" id="reviewFilters"></div>
-      </div>
-      <div class="review-meta" id="reviewMeta"></div>
-      <div id="reviewList" class="check-list"></div>
-      <div class="pager" id="reviewPager"></div>
-      <div class="sticky-bar hide editor-only" id="reviewBar"></div>
-    </div>
-      </div>
-    </section>
+  ROS_BASE.wcLeaveDates = wcLeaveDates;
+  window.wcLeaveDates = function (from, to, max) {
+    var p = WCP.cur, all = [];
+    for (var d = from; d <= to && all.length < (max || 400); d = addDays(d, 1)) all.push(d);
+    if (!p || !all.some(function (x) { return rosOn(p, x); })) return ROS_BASE.wcLeaveDates(from, to, max);
+    return { dates: all.filter(function (x) { return rosLeaveDay(p, x); }), offOnly: false };
+  };
 
-    <!-- ================= ฝ่ายเลขานุการโครงการ: ผู้ใช้ ================= -->
-    <section class="page" id="page-users">
-      <div class="hero">
-        <span class="eyebrow">ผู้ใช้ &amp; หน่วยงาน</span>
-        <h1>บัญชีผู้ใช้และอีเมลหัวหน้า</h1>
-        <p class="lead">อนุมัติบัญชีที่สมัครเข้ามา ผูกกับรายชื่อผู้ปฏิบัติงานโครงการ · ตั้งอีเมลหัวหน้าหน่วยงานที่จะได้รับแจ้งเมื่อรับรองใบลา</p>
-        <div class="tabs" style="margin-top:18px" id="userTabs"></div>
-      </div>
-      <div id="userBody"></div>
-    </section>
+  // ฟอร์มยื่นลาของผู้ปฏิบัติงานโครงการ — ตัวอย่างวันที่จะหักคิดตามตารางของเจ้าของบัญชี
+  if (typeof lvPreview === 'function') {
+    ROS_BASE.lvPreview = lvPreview;
+    window.lvPreview = function () {
+      var prev = WCP.cur;
+      WCP.cur = (st.d && st.d.auth && IX.people && IX.people[st.d.auth.personId]) || null;
+      try { return ROS_BASE.lvPreview.apply(this, arguments); } finally { WCP.cur = prev; }
+    };
+  }
+})();
 
-    <!-- ================= ภาพรวม ================= -->
-    <section class="page" id="page-dash">
-      <div class="hero">
-        <span class="eyebrow" id="dashEyebrow">ภาพรวมโครงการ</span>
-        <h1 id="dashTitle">ภาพรวมการปฏิบัติงาน</h1>
-        <p class="lead">ผลการปฏิบัติงานในภาพรวมของทีม ประกอบด้วยความคืบหน้าโครงการ เวลาปฏิบัติงาน การมาปฏิบัติงาน และการประชุม · ข้อมูลรายบุคคลดูได้ที่หน้า รายบุคคล หรือ รายงาน</p>
-        <div class="filters" data-filters></div>
-      </div>
-      <div id="dashToday"></div>
-      <div id="dashProject"></div>
-      <div class="sec-title"><h2>ผลการปฏิบัติงานภาพรวม</h2><span class="muted small" id="kpiCmp"></span></div>
-      <div class="grid g-kpi" id="kpis"></div>
-      <div class="card mt staff-only" id="dashQueue"></div>
-      <div class="card mt">
-        <div class="card-head"><div><h2>การใช้เวลาของทีม</h2><p class="sub" id="mixSub">สัดส่วนเวลาปฏิบัติงานและการลาหรือภารกิจของทั้งทีม</p></div></div>
-        <div id="dashMix"></div>
-      </div>
-      <details class="card mt person-fold" id="homeCalFold">
-        <summary><div><h2>ปฏิทินการปฏิบัติงาน</h2><p class="sub">ตารางรายเดือนของการปฏิบัติงานในโครงการ · ช่องว่าง = ขึ้นปฏิบัติงานตามปกติ ช่องลายทาง = วันหยุดราชการ<span class="editor-only hide"> · คลิกช่องเพื่อบันทึก/แก้ไข</span></p></div><span class="fold-ic" aria-hidden="true">&#9662;</span></summary>
-        <div class="filters" style="margin-top:12px">
-          <div class="field"><label>เดือน</label><select class="inp" id="calMonth"></select></div>
-          <div class="field"><label>ทีม</label><select class="inp" id="calTeam"></select></div>
-          <div class="field"><label>งานการพยาบาล</label><select class="inp" id="calDiv"></select></div>
-          <button class="btn" id="calPrev">&lsaquo; เดือนก่อน</button><button class="btn" id="calNext">เดือนถัดไป &rsaquo;</button>
-        </div>
-        <ul class="legend" id="calLegend"></ul>
-        <div class="cal-wrap" id="calGrid"></div>
-      </details>
-      <div class="card mt" id="unitCard">
-        <div class="card-head">
-          <div><h2 id="unitTitle">บุคลากรในโครงการ Phoenix</h2><p class="sub" id="unitSub">แสดงบุคลากรทุกคนในโครงการ · คลิกวงกลมหรือแถวเพื่อกรองลงไปทีละชั้น</p></div>
-          <div class="unit-actions"><button class="btn sm hide" id="unitBack">‹ ย้อนกลับ</button><button class="btn sm hide" id="unitViewAll">ล้างตัวกรอง (ดูทุกคน)</button></div>
-        </div>
-        <div class="pies" id="unitPies">
-          <figure class="pie-box"><figcaption>จำนวนสมาชิก</figcaption><div class="chart-box pie"><canvas id="piePeople" role="img" aria-label="วงกลมจำนวนสมาชิกแยกตามหน่วยงาน"></canvas><div class="empty chart-empty hide"></div></div></figure>
-          <figure class="pie-box"><figcaption>เวลาปฏิบัติงานรวม</figcaption><div class="chart-box pie"><canvas id="pieHours" role="img" aria-label="วงกลมเวลาปฏิบัติงานรวมแยกตามหน่วยงาน"></canvas><div class="empty chart-empty hide"></div></div></figure>
-          <figure class="pie-box wide"><figcaption>อัตราการเข้าร่วม <span class="muted small">(มาปฏิบัติงาน ÷ วันทำงาน)</span></figcaption><div class="chart-box pie"><canvas id="barRate" role="img" aria-label="แท่งเปรียบเทียบอัตราการเข้าร่วม"></canvas><div class="empty chart-empty hide"></div></div></figure>
-        </div>
-        <ul class="legend" id="unitLegend"></ul>
-        <div class="tbl-wrap" id="unitTable"></div>
-        <div class="card-head" style="margin:22px 0 10px"><h3 style="margin:0">รายชื่อบุคลากร<span class="muted small" id="unitPeopleCount"></span></h3>
-          <input class="inp" id="unitSearch" placeholder="ค้นหาชื่อ / หอผู้ป่วย" style="max-width:260px"></div>
-        <div class="tbl-wrap" id="unitPeople"></div>
-      </div>
-      <div class="grid g-main mt">
-        <div class="card">
-          <div class="card-head"><div><h2>แนวโน้มรายเดือน</h2><p class="sub" id="trendSub">เวลาปฏิบัติงานรายเดือน</p></div></div>
-          <ul class="legend" id="trendLegend"></ul>
-          <div class="chart-box"><canvas id="trendChart" aria-label="กราฟแนวโน้มรายเดือน" role="img"></canvas><div class="empty chart-empty hide"></div></div>
-        </div>
-        <div class="dark" id="pctPanel"></div>
-      </div>
-      <div class="grid g-2 mt">
-        <div class="card"><div class="card-head"><div><h2>การมาปฏิบัติงานรายวัน</h2><p class="sub" id="heatSub">สัดส่วนสมาชิกที่มาปฏิบัติงานในแต่ละวันทำการ</p></div></div><div id="dashHeat"></div></div>
-        <div class="card"><div class="card-head"><div><h2>ตามวันในสัปดาห์</h2><p class="sub">อัตราการมาปฏิบัติงานเฉลี่ยของทีม</p></div></div><div id="dashWeek"></div></div>
-      </div>
-      <div class="grid g-2 mt">
-        <div class="card"><div class="card-head"><div><h2>การประชุมของทีม</h2><p class="sub" id="meetSub"></p></div><button class="btn sm staff-only" data-go="meetadmin">บริหารการประชุม ›</button></div><div id="dashMeet"></div></div>
-        <div class="card"><div class="card-head"><div><h2>สมาชิก &amp; คุณภาพข้อมูล</h2><p class="sub" id="teamSub"></p></div></div><div id="dashTeam"></div></div>
-      </div>
-    </section>
+/**
+ * แทน aggregate ใน App.html — เนื้อเดิมทุกบรรทัด เพิ่มเฉพาะการตั้ง WCP.cur ระหว่างคิดของแต่ละคน
+ * (ตรวจ "หักเฉพาะวันทำการ" ต้องรู้ว่าเป็นวันทำการของใคร) · ถ้าแก้ aggregate ใน App ต้องแก้ที่นี่ด้วย
+ */
+window.aggregate = function (people, from, to) {
+  var pEnd = to < st.d.today ? to : st.d.today;
+  var res = { by: {}, byType: {}, ded: 0, dedPct: 0, cap: 0, people: [], pEnd: pEnd, partial: pEnd < to };
+  people.forEach(function (p) {
+    var prev = WCP.cur; WCP.cur = p;
+    try {
+      var o = { p: p, byType: {}, ded: 0, dedPct: 0, cap: from <= pEnd ? capMin(p, from, pEnd) : 0, total: 0, n: 0 };
+      (IX.recByP[p.personId] || []).forEach(function (r) {
+        if (r.date < from || r.date > to) return;
+        var m = recMin(r);
+        o.byType[r.type] = (o.byType[r.type] || 0) + m;
+        res.byType[r.type] = (res.byType[r.type] || 0) + m;
+        o.total += m; o.n++;
+        if (deducts(r.type) && isWorkday(r.date)) { o.ded += m; if (r.date <= pEnd) o.dedPct += m; }
+      });
+      o.pct = o.cap ? Math.max(0, (o.cap - o.dedPct) / o.cap) : null;
+      if (o.cap || o.n) { res.by[p.personId] = o; res.people.push(o); res.ded += o.ded; res.dedPct += o.dedPct; res.cap += o.cap; }
+    } finally { WCP.cur = prev; }
+  });
+  res.pct = res.cap ? Math.max(0, (res.cap - res.dedPct) / res.cap) : null;
+  return res;
+};
 
-    <!-- ================= รายบุคคล / สรุปของฉัน ================= -->
-    <section class="page" id="page-person">
-      <div class="hero no-print">
-        <span class="eyebrow" id="pEyebrow">รายบุคคล</span>
-        <h1 id="pTitle">เลือกบุคคล</h1>
-        <p class="lead" id="pLead"></p>
-        <div class="filters">
-          <div class="field" style="min-width:280px;flex:1" id="pSelectWrap"><label>บุคคล</label><select class="inp" id="pSelect"></select></div>
-          <div class="field"><label>ปีงบประมาณ</label><select class="inp" id="pFy"></select></div>
-          <button class="btn sm hide" id="pBackToList">&lsaquo; กลับไปรายชื่อ</button>
-          <button class="btn editor-only hide" id="pEditBtn">แก้ไขข้อมูลบุคคล</button>
-          <button class="btn editor-only hide" id="pAddBtn">+ เพิ่มบุคคล</button>
-        </div>
-        <!-- แท็บย่อยของผู้ปฏิบัติงานโครงการ (ฝ่ายเลขานุการโครงการไม่เห็น) -->
-        <div class="tabs hide" id="pTabsWrap" style="margin-top:18px">
-          <div class="seg my-tabs" id="pTabs"><button data-pt="ov" class="on">ภาพรวม</button><button data-pt="lv">ประวัติการลา</button><button data-pt="rep">รายงาน</button></div>
-        </div>
-      </div>
-      <!-- ===== ประวัติการลาของฉัน ===== -->
-      <div id="pTabLeave" class="hide">
-        <div class="grid g-kpi" id="myLvKpis"></div>
-        <div class="card mt">
-          <div class="card-head"><div><h2>รายการลา</h2><p class="sub" id="myLvSub"></p></div>
-            <div class="field" style="min-width:200px"><label>ประเภท</label><select class="inp" id="myLvType"></select></div></div>
-          <div id="myLvList"></div>
-        </div>
-      </div>
-      <!-- ===== รายงานของฉัน ===== -->
-      <div id="pTabRep" class="hide">
-        <div class="card no-print">
-          <div class="card-head"><div><h2>ช่วงเวลาของรายงาน</h2><p class="sub" id="myRepSub"></p></div></div>
-          <div class="seg my-rep-quick" id="myRepQuick"><button data-mq="month">เดือนนี้</button><button data-mq="prev">เดือนก่อน</button><button data-mq="quarter">ไตรมาสนี้</button><button data-mq="fy">ปีงบประมาณ</button><button data-mq="custom">กำหนดเอง</button></div>
-          <div class="filters hide" id="myRepCustom" style="margin-top:14px">
-            <div class="field"><label>ตั้งแต่</label><input class="inp" type="date" id="myRepFrom"></div>
-            <div class="field"><label>ถึง</label><input class="inp" type="date" id="myRepTo"></div>
-          </div>
-          <div class="filters" style="margin-top:16px"><button class="btn primary" id="myRepPdf">พิมพ์ / บันทึก PDF</button></div>
-        </div>
-        <div class="report mt" id="myRepDoc"></div>
-      </div>
-      <div id="pTabOverview">
-      <div class="grid g-kpi" id="pKpis"></div>
-      <div class="card mt"><h2>เอกสารประจำตัว</h2><p class="sub">เช่น ใบรับรองแพทย์ วุฒิบัตร สำเนาบัตรต่าง ๆ · เจ้าของรายการหรือฝ่ายเลขานุการโครงการแนบ/ลบได้</p>
-        <div id="personAttachWrap"></div></div>
-      <div class="card mt"><h2>รายเดือน</h2><p class="sub">ชั่วโมงแยกตามประเภท และ % เวลาให้โครงการ</p><div class="tbl-wrap" id="pMonthly"></div></div>
-      <div class="card mt"><h2>การลงเวลา</h2><p class="sub" id="pAttSub">จากการสแกนรหัส QR · รายเดือนในปีงบประมาณที่เลือก</p><div class="tbl-wrap" id="pAttendance"></div></div>
-      <div class="grid g-2 mt">
-        <div class="card"><h2>รายไตรมาส</h2><p class="sub">ไตรมาส 1 = ต.ค.–ธ.ค.</p><div class="tbl-wrap" id="pQuarter"></div></div>
-        <div class="card"><h2>บันทึกคำขอ</h2><p class="sub">จากสมุดคำขอของฝ่ายเลขานุการโครงการและใบลาออนไลน์</p><div class="tbl-wrap" id="pRequests" style="max-height:420px;overflow:auto"></div></div>
-      </div>
-      <div class="card mt"><div class="card-head"><div><h2>รายการทั้งหมด</h2><p class="sub">ในปีงบประมาณที่เลือก</p></div>
-        <button class="btn primary sm editor-only hide" id="pAddRec">+ บันทึกรายการ</button></div>
-        <div class="tbl-wrap" id="pRecords"></div></div>
-      </div>
-    </section>
+// ------------------------------------------------------------------ โหลดตาราง (ก่อน/พร้อมข้อมูลหลัก)
+function rosApply(d) {
+  ROS.mode = (d && d.mode) || {};
+  ROS.days = {};
+  Object.keys((d && d.days) || {}).forEach(function (pid) {
+    var m = ROS.days[pid] = {};
+    Object.keys(d.days[pid]).forEach(function (k) {
+      var set = {}; (d.days[pid][k] || []).forEach(function (x) { set[x] = 1; });
+      if (Object.keys(set).length) m[k] = set;
+    });
+  });
+  ROS.at = Date.now();
+  try { wdMemo = {}; } catch (e) { /* - */ }
+}
+function rosFetch(force) {
+  if (ROS.off || !st.token) return Promise.resolve(false);
+  if (!force && ROS.at && Date.now() - ROS.at < ROS.TTL) return Promise.resolve(false);
+  if (ROS.pending) return ROS.pending;
+  ROS.pending = call('apiRosterGet', st.token).then(function (d) { rosApply(d); return true; }, function (e) {
+    if (e && e.code === 'NO_API') ROS.off = true;       // ยังไม่ได้วาง 17_Roster.gs → ใช้รอบโครงการตามเดิม
+    return false;                                       // ข้อผิดพลาดอื่น (เช่น ยังไม่เข้าสู่ระบบ) ไม่รบกวนผู้ใช้
+  }).then(function (changed) { ROS.pending = null; return changed; });
+  return ROS.pending;
+}
+(function () {
+  var baseLoad = load;
+  window.load = function () {
+    var args = arguments, self = this;
+    return rosFetch(false).then(function () { return baseLoad.apply(self, args); });
+  };
+})();
+// การโหลดครั้งแรกเริ่มไปก่อนไฟล์นี้ (bootRoute ใน Portal) — ได้ตารางเมื่อไรค่อยวาดหน้าเดิมใหม่
+rosFetch(true).then(function (changed) {
+  if (changed && st.d && st.page && st.role !== 'STATION') { try { buildIndex(); rerender(); } catch (e) { /* - */ } }
+});
 
-    <!-- ================= ปฏิทินภาพรวมการปฏิบัติงาน ================= -->
-    
-    
-    <!-- ================= ประชุม & คำขอ ================= -->
-    <section class="page" id="page-meet">
-      <div class="hero">
-        <span class="eyebrow">ทะเบียน</span>
-        <h1>ประชุม &amp; บันทึกคำขอ</h1>
-        <p class="lead">ทะเบียนประชุม/อบรม (ใช้ลงชื่อเข้าร่วมด้วย QR ได้) และสมุดบันทึกคำขอ</p>
-        <div class="tabs" style="margin-top:18px">
-          <div class="seg" id="meetTabs"><button data-t="req" class="on">บันทึกคำขอ</button><button data-t="meet">ทะเบียนประชุม</button><button data-t="int">ประชุมภายใน<span class="badge hide" id="intBadge">0</span></button><button data-t="admin">บริหารการประชุม<span class="badge hide" id="maBadge">0</span></button></div>
-        </div>
-        <div class="filters" id="meetFilters"></div>
-      </div>
-      <div id="meetTabMain"><div class="card"><div class="tbl-wrap" id="meetTable"></div></div></div>
-      <div id="meetTabAdmin" class="hide">
-      <div class="hero">
-        <span class="eyebrow">ฝ่ายเลขานุการโครงการ</span>
-        <h1>บริหารการประชุมภายใน</h1>
-        <p class="lead">ตรวจสอบรายละเอียดการประชุมทุกรายการ ตรวจเอกสารสรุป รับรอง แก้ไขแทน ย้อนสถานะ และส่งออกข้อมูลสถิติ</p>
-        <div class="filters">
-          <div class="field"><label>เดือน</label><select class="inp" id="maMonth"></select></div>
-          <div class="field"><label>สถานะ</label><select class="inp" id="maStatus">
-            <option value="">ทั้งหมด</option><option value="PENDING">รอรับรอง</option><option value="CERTIFIED">รับรองแล้ว</option>
-            <option value="REJECTED">ไม่รับรอง</option><option value="CANCELLED">ยกเลิก</option></select></div>
-          <div class="field"><label>เอกสารสรุป</label><select class="inp" id="maDocs">
-            <option value="">ทั้งหมด</option><option value="has">มีเอกสารแล้ว</option><option value="none">ยังไม่มีเอกสาร</option>
-            <option value="warn">ลิงก์ต้องตรวจสิทธิ์</option></select></div>
-          <div class="field" style="flex:1;min-width:200px"><label>ค้นหา</label><input class="inp" id="maQ" placeholder="หัวข้อ ผู้รับผิดชอบ หรือชื่อผู้เข้าร่วม"></div>
-          <button class="btn" id="maXlsx">ส่งออก Excel</button>
-        </div>
-      </div>
-      <div class="grid g-kpi" id="maKpis"></div>
-      <div class="card mt"><h2>รายการประชุม</h2><p class="sub" id="maSub">คลิกแถวเพื่อดูรายละเอียดและจัดการ</p><div class="tbl-wrap" id="maTable"></div></div>
-      <div class="card mt"><h2>สถิติรายเดือน</h2><p class="sub">นับเฉพาะวงที่ไม่ถูกยกเลิก · ชั่วโมงคน = ระยะเวลาประชุม × จำนวนผู้เข้าร่วม (เฉพาะวงที่รับรองแล้ว)</p><div class="tbl-wrap" id="maMonthly"></div></div>
-    </div>
-    </section>
+// ------------------------------------------------------------------ ใครยังไม่มีตารางของเดือนนี้
+function rosPeople() {
+  return Object.keys(ROS.mode).map(function (pid) { return IX.people && IX.people[pid]; })
+    .filter(function (p) { return p && p.status !== 'LEFT'; })
+    .sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+}
+function rosMissing(ymk) {
+  return rosPeople().filter(function (p) {
+    return rosOn(p, ymk + '-01') && !(ROS.days[p.personId] && ROS.days[p.personId][ymk]);
+  });
+}
 
-    
-    <!-- ================= รายงาน ================= -->
-    <section class="page" id="page-report">
-      <div class="hero no-print">
-        <span class="eyebrow" id="repEyebrow">ส่งออกรายงาน</span>
-        <h1 id="repTitle">รายงานการปฏิบัติงานและการลา</h1>
-        <p class="lead" id="repLead">เลือกฉบับที่ต้องการ · รายเดือน รายไตรมาส รายปีงบประมาณ · พิมพ์เป็น PDF บันทึกไฟล์ Excel หรือส่งอีเมลถึงหัวหน้าหน่วยงาน</p>
-        <div class="tabs" style="margin-top:18px">
-          <div class="seg" id="repTabs"><button data-r="summary" class="on">ภาพรวม</button><button data-r="leave">รายละเอียดการลา</button></div>
-        </div>
-        <div class="filters" data-filters></div>
-        <div class="filters" id="reportPersonBox"></div>
-        <div class="filters">
-          <button class="btn primary" id="btnPdf">พิมพ์ / บันทึก PDF</button>
-          <button class="btn" id="btnXlsx">บันทึกไฟล์ Excel</button>
-          <button class="btn" id="btnCsv">บันทึกไฟล์ CSV</button>
-          <button class="btn editor-only hide" id="btnMail">✉ ส่งอีเมลถึงหัวหน้าหน่วยงาน</button>
-          <button class="btn editor-only hide" id="btnMonthlyBatch">✉ ส่งรายงานประจำเดือนทั้งโครงการ</button>
-        </div>
-      </div>
-      <div id="repBench"></div>
-      <div class="report" id="reportDoc"></div>
-    </section>
+// ------------------------------------------------------------------ หน้าต่างกรอกตาราง (ฝ่ายเลขานุการโครงการ)
+var ROSU = { ym: '', draft: {}, dirty: {}, busy: false };
+function rosYmShift(k, n) {
+  var y = +k.slice(0, 4), m = +k.slice(5, 7) + n;
+  while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; }
+  return y + '-' + pad(m);
+}
+function rosDaysOf(k) {
+  var out = [], end = monthEnd(+k.slice(0, 4), +k.slice(5, 7));
+  for (var d = k + '-01'; d <= end; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+function rosDraftReset() {
+  ROSU.draft = {}; ROSU.dirty = {};
+  rosPeople().forEach(function (p) {
+    var set = ROS.days[p.personId] && ROS.days[p.personId][ROSU.ym];
+    ROSU.draft[p.personId] = set ? Object.assign({}, set) : {};
+  });
+}
+function rosOpen(ymk) {
+  if (!isStaff()) return;
+  if (ROS.off) return toast('ยังไม่ได้วางไฟล์ 17_Roster ในระบบ', true);
+  ROSU.ym = ymk || ROSU.ym || ym(st.d.today);
+  rosFetch(true).then(function () { rosDraftReset(); rosRender(); });
+}
+function rosRender() {
+  var k = ROSU.ym, days = rosDaysOf(k), people = rosPeople();
+  var dirtyN = Object.keys(ROSU.dirty).length;
+  var inRoster = {}; people.forEach(function (p) { inRoster[p.personId] = 1; });
+  var others = (st.d.people || []).filter(function (p) { return p.role === 'KEY_USER' && p.status !== 'LEFT' && !inRoster[p.personId]; })
+    .sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  var head = '<thead><tr><th class="pn">ชื่อ-สกุล</th>' + days.map(function (d) {
+    var w = wd(d), hol = IX.hol && IX.hol[d];
+    return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (hol ? 'hol' : '') + '" title="' + esc(hol ? hol.name : '') + '">' +
+      (+d.slice(8)) + '<span class="ros-sub">' + TH_WD[w] + '</span></th>';
+  }).join('') + '</tr></thead>';
+  var body = people.map(function (p) {
+    var set = ROSU.draft[p.personId] || {}, n = Object.keys(set).length, active = rosOn(p, k + '-01');
+    return '<tr><td class="pn"><b>' + esc(p.fullName) + '</b>' +
+      '<span class="ros-sub muted">' + (active ? (n ? n + ' วัน' : '<span class="t-warn">ยังไม่มีตาราง</span>') : 'เริ่มใช้ตาราง ' + esc(thMonth(ROS.mode[p.personId], true))) +
+      (ROSU.dirty[p.personId] ? ' · <span class="ros-dirty">ยังไม่บันทึก</span>' : '') +
+      ' · <a href="#" data-ros-off="' + p.personId + '">นำออก</a></span></td>' +
+      days.map(function (d) {
+        return '<td' + (IX.hol && IX.hol[d] ? ' class="hol"' : '') + '><button type="button" class="ros-cell' + (set[d] ? ' on' : '') + '" data-ros-cell="' + p.personId + '|' + d + '"' +
+          (active ? '' : ' disabled') + ' title="' + esc(thDate(d)) + '">' + (set[d] ? '✓' : '') + '</button></td>';
+      }).join('') + '</tr>';
+  }).join('');
+  openModal('<h3>ตารางวันมาปฏิบัติงาน</h3>' +
+    '<p class="muted small">สำหรับผู้ปฏิบัติงานโครงการที่มาแค่บางวัน · วันที่เลือกจะเป็นวันทำการของคนนั้นแทนรอบวันทำการของโครงการ ' +
+    '(นับแม้ตรงกับวันหยุดราชการ ยกเว้นช่วงยกเว้น) · เดือนที่ยังไม่มีตาราง ระบบนับเฉพาะวันที่มาจริง · การลาหักเฉพาะวันในตาราง</p>' +
+    '<div class="ros-head"><button class="btn sm" type="button" data-ros-nav="-1">‹</button><span class="ros-month">' + esc(thMonth(k, true)) + '</span>' +
+    '<button class="btn sm" type="button" data-ros-nav="1">›</button>' +
+    (people.length ? '<button class="btn sm" type="button" data-ros-copy>คัดลอกวันในสัปดาห์จากเดือนก่อน</button>' : '') + '</div>' +
+    (people.length ? '<div class="ros-wrap"><table class="ros-grid">' + head + '<tbody>' + body + '</tbody></table></div>'
+      : '<div class="empty">ยังไม่มีผู้ปฏิบัติงานโครงการที่ใช้ตาราง — เลือกรายชื่อด้านล่างเพื่อเพิ่ม</div>') +
+    '<div class="ros-bar"><select class="inp" id="rosAddSel" style="max-width:320px"><option value="">+ เพิ่มคนที่มาแค่บางวัน…</option>' +
+      others.map(function (p) { return '<option value="' + p.personId + '">' + esc(p.fullName) + (p.ward ? ' · ' + esc(p.ward) : '') + '</option>'; }).join('') +
+    '</select><span class="muted small">เริ่มใช้ตารางตั้งแต่เดือนที่เปิดอยู่</span></div>' +
+    '<div class="actions"><button class="btn" data-close>ปิด</button>' +
+    '<button class="btn primary" type="button" id="rosSave"' + (dirtyN ? '' : ' disabled') + '>บันทึกตาราง' + (dirtyN ? ' (' + dirtyN + ' คน)' : '') + '</button></div>');
+  $('#modal').classList.add('wide');
+  $('#modal').setAttribute('data-ros', '1');
+}
+function rosSave() {
+  var ids = Object.keys(ROSU.dirty); if (!ids.length || ROSU.busy) return;
+  ROSU.busy = true;
+  var b = $('#rosSave'); if (b) { b.disabled = true; b.textContent = 'กำลังบันทึก…'; }
+  var rows = ids.map(function (pid) { return { personId: pid, dates: Object.keys(ROSU.draft[pid] || {}).sort() }; });
+  call('apiRosterSave', st.token, ROSU.ym, rows).then(function (r) {
+    (r.rows || []).forEach(function (x) {
+      var m = ROS.days[x.personId] = ROS.days[x.personId] || {};
+      if (x.dates.length) { var set = {}; x.dates.forEach(function (d) { set[d] = 1; }); m[r.month] = set; } else delete m[r.month];
+    });
+    try { wdMemo = {}; } catch (e) { /* - */ }
+    ROSU.dirty = {};
+    toast('บันทึกตาราง ' + thMonth(r.month, true) + ' แล้ว ' + (r.rows || []).length + ' คน');
+    rosRender();
+  }).catch(function (e) { handleErr(e); rosRender(); }).then(function () { ROSU.busy = false; });
+}
+function rosModeSet(pid, on) {
+  return call('apiRosterMode', st.token, pid, on ? 'ROSTER' : '', on ? ROSU.ym : '').then(function (r) {
+    if (r.mode) ROS.mode[pid] = r.since || ''; else delete ROS.mode[pid];
+    try { wdMemo = {}; } catch (e) { /* - */ }
+    if (on && !ROSU.draft[pid]) ROSU.draft[pid] = {};
+    if (!on) { delete ROSU.draft[pid]; delete ROSU.dirty[pid]; }
+    rosRender();
+  }).catch(handleErr);
+}
+document.addEventListener('click', function (e) {
+  var t;
+  if ((t = e.target.closest('[data-ros-open]'))) { e.preventDefault(); rosOpen(); return; }
+  if (!$('#modal') || !$('#modal').getAttribute('data-ros')) return;
+  if ((t = e.target.closest('[data-ros-cell]'))) {
+    var k = t.getAttribute('data-ros-cell').split('|'), set = ROSU.draft[k[0]] || (ROSU.draft[k[0]] = {});
+    if (set[k[1]]) delete set[k[1]]; else set[k[1]] = 1;
+    ROSU.dirty[k[0]] = 1;
+    t.classList.toggle('on', !!set[k[1]]); t.textContent = set[k[1]] ? '✓' : '';
+    var sv = $('#rosSave'), n = Object.keys(ROSU.dirty).length;
+    if (sv) { sv.disabled = !n; sv.textContent = 'บันทึกตาราง (' + n + ' คน)'; }
+    return;
+  }
+  if ((t = e.target.closest('[data-ros-nav]'))) {
+    if (Object.keys(ROSU.dirty).length && !confirm('มีตารางที่ยังไม่บันทึก เปลี่ยนเดือนแล้วการแก้ไขจะหายไป ต้องการเปลี่ยนเดือนหรือไม่')) return;
+    ROSU.ym = rosYmShift(ROSU.ym, +t.getAttribute('data-ros-nav')); rosDraftReset(); rosRender(); return;
+  }
+  if (e.target.closest('[data-ros-copy]')) {
+    var prev = rosYmShift(ROSU.ym, -1), days = rosDaysOf(ROSU.ym), changed = 0;
+    rosPeople().forEach(function (p) {
+      var src = ROS.days[p.personId] && ROS.days[p.personId][prev];
+      if (!src || !rosOn(p, ROSU.ym + '-01')) return;
+      var wds = {}; Object.keys(src).forEach(function (d) { wds[wd(d)] = 1; });
+      var set = {}; days.forEach(function (d) { if (wds[wd(d)] && !(IX.hol && IX.hol[d])) set[d] = 1; });
+      ROSU.draft[p.personId] = set; ROSU.dirty[p.personId] = 1; changed++;
+    });
+    if (!changed) return toast('เดือนก่อนยังไม่มีตารางให้คัดลอก', true);
+    toast('คัดลอกวันในสัปดาห์จากเดือนก่อนให้ ' + changed + ' คน (ข้ามวันหยุดราชการ) — ตรวจแล้วกดบันทึก');
+    rosRender(); return;
+  }
+  if ((t = e.target.closest('[data-ros-off]'))) {
+    e.preventDefault();
+    var p = IX.people[t.getAttribute('data-ros-off')];
+    if (!confirm('นำ ' + (p ? p.fullName : '') + ' ออกจากการใช้ตาราง? ระบบจะกลับไปคิดตามรอบวันทำการของโครงการ (ตารางที่บันทึกไว้ยังเก็บอยู่)')) return;
+    rosModeSet(t.getAttribute('data-ros-off'), false); return;
+  }
+  if (e.target.id === 'rosSave') { rosSave(); return; }
+});
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'rosAddSel' || !e.target.value) return;
+  var pid = e.target.value; e.target.disabled = true;
+  rosModeSet(pid, true);
+});
+$('#modalBg').addEventListener('click', function (e) {
+  if (e.target === this || e.target.closest('[data-close]')) {
+    var wasRos = $('#modal').getAttribute('data-ros');
+    $('#modal').removeAttribute('data-ros');
+    if (wasRos && st.page) { try { rerender(); } catch (x) { /* - */ } }   // ตัวเลขทุกหน้าคิดใหม่ตามตาราง
+  }
+}, true);
 
-    <!-- ================= ตั้งค่า ================= -->
-    <section class="page" id="page-system">
-      <div class="hero">
-        <span class="eyebrow">ตั้งค่าระบบ</span>
-        <h1>วันหยุด ประเภท และประวัติการแก้ไข</h1>
-        <p class="lead">ค่าตัวเลข (ชั่วโมง/วัน, เวลาเข้างาน, เป้า %) แก้ไขได้ที่ชีต <b>Settings</b> จากนั้นเลือกรีเฟรช ระบบจะคำนวณใหม่ทั้งหมด</p>
-      </div>
-      <div class="grid g-2">
-        <div class="card"><div class="card-head"><div><h2>วันหยุดราชการ</h2><p class="sub">ใช้สำหรับตัดออกจากวันทำการ</p></div>
-          <button class="btn sm primary editor-only hide" id="holAdd">+ เพิ่มวันหยุด</button></div><div class="tbl-wrap" id="holTable" style="max-height:480px;overflow:auto"></div></div>
-        <div class="card"><h2>ค่าที่ใช้คำนวณ</h2><p class="sub">จากชีต Settings และ Types</p><div id="sysSettings"></div></div>
-      </div>
-      <!-- รอบวันทำการของโครงการ + ช่วงยกเว้น (ทุกคนเห็น · ฝ่ายเลขานุการโครงการแก้ได้) -->
-      <div class="card mt" id="wcCard">
-        <div class="card-head">
-          <div><h2>รอบวันทำการของโครงการ</h2>
-            <p class="sub">วันในสัปดาห์ที่โครงการทำงาน แยกตามช่วงเวลา และช่วงยกเว้นที่ไม่นับเลย · ใช้คิด % เวลาโครงการ วันลา การขาด/ไม่พบการลงเวลา และการลงเวลาด้วยตนเอง</p></div>
-          <button class="btn sm primary editor-only hide" id="wcSave">บันทึกรอบวันทำการ</button>
-        </div>
-        <div id="wcBox"></div>
-      </div>
-      <!-- ตั้งค่าและส่งรายงานประจำเดือนถึงหัวหน้าหน่วยงาน (เฉพาะฝ่ายเลขานุการโครงการ) -->
-      <div class="card mt editor-only hide">
-        <div class="card-head">
-          <div><h2>การส่งรายงานประจำเดือนถึงหัวหน้าหน่วยงาน</h2>
-            <p class="sub">เปิด/ปิดการส่งอัตโนมัติทุกวันที่ 1 ของเดือน หรือเลือกเดือนแล้วส่งเองได้ทันทีจากหน้านี้</p></div>
-          <button class="btn sm primary" id="mrSaveCfg">บันทึกการตั้งค่า</button>
-        </div>
-        <div id="mrBox"></div>
-      </div>
-      <div class="card mt editor-only hide"><div class="card-head"><div><h2>ข้อมูลโครงการ</h2><p class="sub">แสดงบนหน้าภาพรวม · เว้นว่างช่องไหน ช่องนั้นจะไม่แสดง</p></div>
-        <button class="btn sm primary" id="pjSave">บันทึกข้อมูลโครงการ</button></div><div id="pjBox"></div></div>
-      <div class="card mt editor-only hide"><div class="card-head"><div><h2>ลงเวลาด้วยตนเอง &amp; เปิดรับอัตโนมัติ</h2>
-        <p class="sub">รอบลงเวลาประจำวันเปิดเองตามช่วงเวลาที่ตั้งไว้ · ผู้ที่มาก่อนเวลาเปิดรับกดขอลงชื่อไว้ก่อนได้ ระบบนับให้เมื่อถึงเวลาโดยคิดเวลาตามที่กดจริง</p></div>
-        <button class="btn sm primary" id="scSave">บันทึกการตั้งค่า</button></div><div id="scBox"></div></div>
-      <div class="card mt editor-only hide"><div class="card-head"><div><h2>ประเภทบุคลากร</h2><p class="sub">สรุปจำนวนคนแยกตามประเภท · ระบุเป็นรายคน ไม่ได้ยึดตามงานการพยาบาล</p></div></div><div id="ugBox"></div></div>
-      <div class="card mt editor-only hide"><div class="card-head"><div><h2>ลายมือชื่อของฉัน</h2><p class="sub">ใช้ลงชื่อในรายการที่ยืนยัน ใบลาที่รับรอง อีเมลถึงหัวหน้า และรายงาน PDF</p></div>
-        <button class="btn sm" id="sigEdit">วาดลายมือชื่อใหม่</button></div><div id="sigMine"></div></div>
-      <div class="card mt editor-only hide"><h2>ประวัติการแก้ไข</h2><p class="sub">200 รายการล่าสุดจากชีต AuditLog</p><div class="tbl-wrap" id="auditTable" style="max-height:480px;overflow:auto"></div></div>
-    </section>
-
-    <div class="support no-print hide" id="supportCta">
-      <div><h3>ข้อมูลทั้งหมดอยู่ใน Google Sheet</h3><p>สามารถแก้ไขในชีตได้โดยตรง จากนั้นเลือกรีเฟรชหน้านี้ · ทุกการบันทึกผ่านเว็บจะถูกเก็บใน AuditLog</p></div>
-      <button class="btn" id="btnReload">รีเฟรชข้อมูล</button>
-    </div>
-  </main>
-
-  <!-- แถบล่างบนมือถือ (ผู้ปฏิบัติงานโครงการ) -->
-  <nav class="tabbar hide no-print" id="tabbar">
-    <button data-page="home"><svg viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3zM18 18h3v3h-3zM14 18h2v3h-2zM18 14h3v2h-3z"/></svg>ลงเวลา</button>
-    <button data-page="leave"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6zM14 3v5h5M9 13h8M9 17h6"/></svg>ยื่นลา</button>
-    <button data-page="mymeet"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c.8-3.2 3-5 6-5s5.2 1.8 6 5M16 14.5c2.2.4 3.6 2 4.2 4.5"/></svg>ประชุม</button>
-    <button data-page="person"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>สรุป</button>
-    <button data-page="account"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>บัญชี</button>
-  </nav>
-
-  <div class="modal-bg" id="modalBg"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
-  <div class="toast" id="toast"></div>
-
-  <script>var ROUTE = <?!= routeJson ?>;</script>
-  <?!= include('App'); ?>
-  <?!= include('Portal'); ?>
-  <?!= include('AttReport'); ?>
-  <?!= include('Roster'); ?>
-</body>
-</html>
+// ------------------------------------------------------------------ ทางเข้า: หน้า ผู้ใช้ + งานค้างบนหน้าภาพรวม
+(function () {
+  if (RENDER.users) {
+    var baseUsers = RENDER.users;
+    RENDER.users = function () {
+      baseUsers.apply(this, arguments);
+      if (!isStaff() || ROS.off || $('#rosUsersBar')) return;
+      var tabs = $('#userTabs'); if (!tabs) return;
+      var miss = rosMissing(ym(st.d.today)).length;
+      tabs.insertAdjacentHTML('afterend', '<div class="ros-bar" id="rosUsersBar"><button class="btn sm primary" type="button" data-ros-open>📅 ตารางวันมาปฏิบัติงาน (คนที่มาแค่บางวัน)</button>' +
+        '<span class="muted small">' + rosPeople().length + ' คนใช้ตาราง' + (miss ? ' · <span class="t-warn">ยังไม่มีตารางเดือนนี้ ' + miss + ' คน</span>' : '') + '</span></div>');
+    };
+  }
+  if (typeof renderQueue === 'function') {
+    var baseQueue = renderQueue;
+    window.renderQueue = function () {
+      baseQueue.apply(this, arguments);
+      if (ROS.off) return;
+      var miss = rosMissing(ym(st.d.today)).length, q = $('#dashQueue .queue');
+      if (!miss || !q) return;
+      q.insertAdjacentHTML('beforeend', '<button class="q-item on warn" type="button" data-ros-open><b class="num">' + miss + '</b>' +
+        '<span>ยังไม่มีตารางวันมา (เดือนนี้)</span><i>›</i></button>');
+    };
+  }
+})();
+</script>
+<!-- ===== จบส่วนเสริม ===== -->
