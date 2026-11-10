@@ -1,0 +1,347 @@
+<style>
+  .ros-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0 0; }
+  .ros-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 12px; }
+  .ros-head .ros-month { font-weight: 700; min-width: 140px; text-align: center; }
+  .ros-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--outline-2, #e5e7eb); border-radius: 10px; }
+  .ros-grid { border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  .ros-grid th, .ros-grid td { padding: 0; text-align: center; border-bottom: 1px solid var(--outline-2, #e5e7eb); }
+  .ros-grid thead th { position: sticky; top: 0; background: var(--surface, #fff); z-index: 1; padding: 4px 0; min-width: 30px; }
+  .ros-grid th.pn, .ros-grid td.pn { position: sticky; left: 0; background: var(--surface, #fff); text-align: left; padding: 6px 10px;
+                                     min-width: 170px; max-width: 220px; z-index: 2; }
+  .ros-grid thead th.pn { z-index: 3; }
+  .ros-grid .we { color: var(--critical, #c0392b); }
+  .ros-grid .hol { background: repeating-linear-gradient(135deg, var(--outline-2, #eee) 0 3px, transparent 3px 6px); }
+  .ros-cell { width: 28px; height: 28px; margin: 2px; border-radius: 6px; border: 1px solid var(--outline, #d1d5db);
+              background: transparent; cursor: pointer; font: inherit; color: inherit; }
+  .ros-cell.on { background: var(--primary, #2a78d6); border-color: var(--primary, #2a78d6); color: #fff; }
+  .ros-cell:disabled { cursor: default; opacity: .5; }
+  .ros-sub { display: block; font-size: 11px; }
+  .ros-dirty { color: var(--warn, #b45309); }
+</style>
+<script>
+'use strict';
+/* Phoenix Workspace — Roster
+ * ตารางวันมาปฏิบัติงานรายเดือนของผู้ปฏิบัติงานโครงการที่มาแค่บางวัน (17_Roster.gs)
+ *   · ทำให้การนับวันทำการรู้ว่ากำลังคิดให้ใคร: isWorkday(d) ดูตารางของ "คนที่กำลังคำนวณอยู่" (WCP.cur)
+ *     โดยครอบ dayStatus / attStats / capMin / offDutyDays_ / workdays / wcLeaveDates / lvPreview และแทน aggregate
+ *   · หน้าต่างกรอกตาราง (ฝ่ายเลขานุการโครงการ) เปิดจากหน้า ผู้ใช้ และจากงานค้างบนหน้าภาพรวม
+ *   · กติกาเดียวกับฝั่งเซิร์ฟเวอร์ (17_Roster.gs) — แก้ที่หนึ่งต้องแก้อีกที่ด้วย
+ * ต้องโหลดหลัง App และ Portal (Index.html: <?!= include('Roster'); ?> ต่อท้ายรายการ include)
+ */
+API_FILE.apiRosterGet = '17_Roster';
+API_FILE.apiRosterSave = '17_Roster';
+API_FILE.apiRosterMode = '17_Roster';
+
+var ROS = { mode: {}, days: {}, at: 0, off: false, pending: null, TTL: 5 * 60000 };
+var WCP = { cur: null };          // คนที่กำลังคำนวณวันทำการให้อยู่ (null = ใช้รอบโครงการ)
+
+// ------------------------------------------------------------------ กติกาวันทำการรายคน
+function rosOn(p, d) {
+  if (!p || ROS.off) return false;
+  var since = ROS.mode[p.personId];
+  return since !== undefined && (!since || String(d).slice(0, 7) >= since);
+}
+function rosMonth(p, d) { var m = ROS.days[p.personId]; return m ? m[String(d).slice(0, 7)] || null : null; }
+function rosActive(p, d) {
+  var k = p.personId + '|' + d;
+  if (IX.att && IX.att[k]) return true;
+  if (IX.dayRec) return !!(IX.dayRec[k] && IX.dayRec[k].length);
+  return (IX.recByP && IX.recByP[p.personId] || []).some(function (r) { return r.date === d; });
+}
+/** เดือนที่มีตาราง = วันในตาราง (ยกเว้นช่วงยกเว้น) · ยังไม่มีตาราง = เฉพาะวันที่มาหรือมีรายการลา */
+function rosWorkday(p, d) {
+  var set = rosMonth(p, d);
+  return set ? !!set[d] && !wcExcluded(d) : rosActive(p, d) && !wcExcluded(d);
+}
+/** วันลาที่หักชั่วโมงได้ — เดือนที่ยังไม่มีตารางใช้รอบโครงการไปก่อน (ตรงกับ rosLeaveDay_ ฝั่งเซิร์ฟเวอร์) */
+function rosLeaveDay(p, d) {
+  if (!rosOn(p, d)) return ROS_BASE.isWorkday(d);
+  var set = rosMonth(p, d);
+  return set ? !!set[d] && !wcExcluded(d) : ROS_BASE.isWorkday(d);
+}
+
+var ROS_BASE = {};
+/** ครอบฟังก์ชันเดิมให้ตั้ง WCP.cur = คนที่ส่งเข้ามา (อาร์กิวเมนต์แรก) ระหว่างคำนวณ */
+function rosWrapPerson(name) {
+  var base = window[name];
+  if (typeof base !== 'function') return;
+  ROS_BASE[name] = base;
+  window[name] = function (p) {
+    var prev = WCP.cur; WCP.cur = p || null;
+    try { return base.apply(this, arguments); } finally { WCP.cur = prev; }
+  };
+}
+(function () {
+  ROS_BASE.isWorkday = isWorkday;
+  window.isWorkday = function (d) { var p = WCP.cur; return rosOn(p, d) ? rosWorkday(p, d) : ROS_BASE.isWorkday(d); };
+
+  ROS_BASE.workdays = workdays;          // ตัวเดิมจำผลตามช่วงวันที่ — ใช้ได้เฉพาะรอบโครงการ
+  window.workdays = function (from, to) {
+    var p = WCP.cur;
+    if (!p || ROS.off || ROS.mode[p.personId] === undefined) return ROS_BASE.workdays(from, to);
+    var n = 0;
+    for (var d = from; d <= to; d = addDays(d, 1)) if (isWorkday(d)) n++;
+    return n;
+  };
+
+  ['dayStatus', 'attStats', 'capMin', 'offDutyDays_'].forEach(rosWrapPerson);
+
+  ROS_BASE.wcLeaveDates = wcLeaveDates;
+  window.wcLeaveDates = function (from, to, max) {
+    var p = WCP.cur, all = [];
+    for (var d = from; d <= to && all.length < (max || 400); d = addDays(d, 1)) all.push(d);
+    if (!p || !all.some(function (x) { return rosOn(p, x); })) return ROS_BASE.wcLeaveDates(from, to, max);
+    return { dates: all.filter(function (x) { return rosLeaveDay(p, x); }), offOnly: false };
+  };
+
+  // ฟอร์มยื่นลาของผู้ปฏิบัติงานโครงการ — ตัวอย่างวันที่จะหักคิดตามตารางของเจ้าของบัญชี
+  if (typeof lvPreview === 'function') {
+    ROS_BASE.lvPreview = lvPreview;
+    window.lvPreview = function () {
+      var prev = WCP.cur;
+      WCP.cur = (st.d && st.d.auth && IX.people && IX.people[st.d.auth.personId]) || null;
+      try { return ROS_BASE.lvPreview.apply(this, arguments); } finally { WCP.cur = prev; }
+    };
+  }
+})();
+
+/**
+ * แทน aggregate ใน App.html — เนื้อเดิมทุกบรรทัด เพิ่มเฉพาะการตั้ง WCP.cur ระหว่างคิดของแต่ละคน
+ * (ตรวจ "หักเฉพาะวันทำการ" ต้องรู้ว่าเป็นวันทำการของใคร) · ถ้าแก้ aggregate ใน App ต้องแก้ที่นี่ด้วย
+ */
+window.aggregate = function (people, from, to) {
+  var pEnd = to < st.d.today ? to : st.d.today;
+  var res = { by: {}, byType: {}, ded: 0, dedPct: 0, cap: 0, people: [], pEnd: pEnd, partial: pEnd < to };
+  people.forEach(function (p) {
+    var prev = WCP.cur; WCP.cur = p;
+    try {
+      var o = { p: p, byType: {}, ded: 0, dedPct: 0, cap: from <= pEnd ? capMin(p, from, pEnd) : 0, total: 0, n: 0 };
+      (IX.recByP[p.personId] || []).forEach(function (r) {
+        if (r.date < from || r.date > to) return;
+        var m = recMin(r);
+        o.byType[r.type] = (o.byType[r.type] || 0) + m;
+        res.byType[r.type] = (res.byType[r.type] || 0) + m;
+        o.total += m; o.n++;
+        if (deducts(r.type) && isWorkday(r.date)) { o.ded += m; if (r.date <= pEnd) o.dedPct += m; }
+      });
+      o.pct = o.cap ? Math.max(0, (o.cap - o.dedPct) / o.cap) : null;
+      if (o.cap || o.n) { res.by[p.personId] = o; res.people.push(o); res.ded += o.ded; res.dedPct += o.dedPct; res.cap += o.cap; }
+    } finally { WCP.cur = prev; }
+  });
+  res.pct = res.cap ? Math.max(0, (res.cap - res.dedPct) / res.cap) : null;
+  return res;
+};
+
+// ------------------------------------------------------------------ โหลดตาราง (ก่อน/พร้อมข้อมูลหลัก)
+function rosApply(d) {
+  ROS.mode = (d && d.mode) || {};
+  ROS.days = {};
+  Object.keys((d && d.days) || {}).forEach(function (pid) {
+    var m = ROS.days[pid] = {};
+    Object.keys(d.days[pid]).forEach(function (k) {
+      var set = {}; (d.days[pid][k] || []).forEach(function (x) { set[x] = 1; });
+      if (Object.keys(set).length) m[k] = set;
+    });
+  });
+  ROS.at = Date.now();
+  try { wdMemo = {}; } catch (e) { /* - */ }
+}
+function rosFetch(force) {
+  if (ROS.off || !st.token) return Promise.resolve(false);
+  if (!force && ROS.at && Date.now() - ROS.at < ROS.TTL) return Promise.resolve(false);
+  if (ROS.pending) return ROS.pending;
+  ROS.pending = call('apiRosterGet', st.token).then(function (d) { rosApply(d); return true; }, function (e) {
+    if (e && e.code === 'NO_API') ROS.off = true;       // ยังไม่ได้วาง 17_Roster.gs → ใช้รอบโครงการตามเดิม
+    return false;                                       // ข้อผิดพลาดอื่น (เช่น ยังไม่เข้าสู่ระบบ) ไม่รบกวนผู้ใช้
+  }).then(function (changed) { ROS.pending = null; return changed; });
+  return ROS.pending;
+}
+(function () {
+  var baseLoad = load;
+  window.load = function () {
+    var args = arguments, self = this;
+    return rosFetch(false).then(function () { return baseLoad.apply(self, args); });
+  };
+})();
+// การโหลดครั้งแรกเริ่มไปก่อนไฟล์นี้ (bootRoute ใน Portal) — ได้ตารางเมื่อไรค่อยวาดหน้าเดิมใหม่
+rosFetch(true).then(function (changed) {
+  if (changed && st.d && st.page && st.role !== 'STATION') { try { buildIndex(); rerender(); } catch (e) { /* - */ } }
+});
+
+// ------------------------------------------------------------------ ใครยังไม่มีตารางของเดือนนี้
+function rosPeople() {
+  return Object.keys(ROS.mode).map(function (pid) { return IX.people && IX.people[pid]; })
+    .filter(function (p) { return p && p.status !== 'LEFT'; })
+    .sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+}
+function rosMissing(ymk) {
+  return rosPeople().filter(function (p) {
+    return rosOn(p, ymk + '-01') && !(ROS.days[p.personId] && ROS.days[p.personId][ymk]);
+  });
+}
+
+// ------------------------------------------------------------------ หน้าต่างกรอกตาราง (ฝ่ายเลขานุการโครงการ)
+var ROSU = { ym: '', draft: {}, dirty: {}, busy: false };
+function rosYmShift(k, n) {
+  var y = +k.slice(0, 4), m = +k.slice(5, 7) + n;
+  while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; }
+  return y + '-' + pad(m);
+}
+function rosDaysOf(k) {
+  var out = [], end = monthEnd(+k.slice(0, 4), +k.slice(5, 7));
+  for (var d = k + '-01'; d <= end; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+function rosDraftReset() {
+  ROSU.draft = {}; ROSU.dirty = {};
+  rosPeople().forEach(function (p) {
+    var set = ROS.days[p.personId] && ROS.days[p.personId][ROSU.ym];
+    ROSU.draft[p.personId] = set ? Object.assign({}, set) : {};
+  });
+}
+function rosOpen(ymk) {
+  if (!isStaff()) return;
+  if (ROS.off) return toast('ยังไม่ได้วางไฟล์ 17_Roster ในระบบ', true);
+  ROSU.ym = ymk || ROSU.ym || ym(st.d.today);
+  rosFetch(true).then(function () { rosDraftReset(); rosRender(); });
+}
+function rosRender() {
+  var k = ROSU.ym, days = rosDaysOf(k), people = rosPeople();
+  var dirtyN = Object.keys(ROSU.dirty).length;
+  var inRoster = {}; people.forEach(function (p) { inRoster[p.personId] = 1; });
+  var others = (st.d.people || []).filter(function (p) { return p.role === 'KEY_USER' && p.status !== 'LEFT' && !inRoster[p.personId]; })
+    .sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  var head = '<thead><tr><th class="pn">ชื่อ-สกุล</th>' + days.map(function (d) {
+    var w = wd(d), hol = IX.hol && IX.hol[d];
+    return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (hol ? 'hol' : '') + '" title="' + esc(hol ? hol.name : '') + '">' +
+      (+d.slice(8)) + '<span class="ros-sub">' + TH_WD[w] + '</span></th>';
+  }).join('') + '</tr></thead>';
+  var body = people.map(function (p) {
+    var set = ROSU.draft[p.personId] || {}, n = Object.keys(set).length, active = rosOn(p, k + '-01');
+    return '<tr><td class="pn"><b>' + esc(p.fullName) + '</b>' +
+      '<span class="ros-sub muted">' + (active ? (n ? n + ' วัน' : '<span class="t-warn">ยังไม่มีตาราง</span>') : 'เริ่มใช้ตาราง ' + esc(thMonth(ROS.mode[p.personId], true))) +
+      (ROSU.dirty[p.personId] ? ' · <span class="ros-dirty">ยังไม่บันทึก</span>' : '') +
+      ' · <a href="#" data-ros-off="' + p.personId + '">นำออก</a></span></td>' +
+      days.map(function (d) {
+        return '<td' + (IX.hol && IX.hol[d] ? ' class="hol"' : '') + '><button type="button" class="ros-cell' + (set[d] ? ' on' : '') + '" data-ros-cell="' + p.personId + '|' + d + '"' +
+          (active ? '' : ' disabled') + ' title="' + esc(thDate(d)) + '">' + (set[d] ? '✓' : '') + '</button></td>';
+      }).join('') + '</tr>';
+  }).join('');
+  openModal('<h3>ตารางวันมาปฏิบัติงาน</h3>' +
+    '<p class="muted small">สำหรับผู้ปฏิบัติงานโครงการที่มาแค่บางวัน · วันที่เลือกจะเป็นวันทำการของคนนั้นแทนรอบวันทำการของโครงการ ' +
+    '(นับแม้ตรงกับวันหยุดราชการ ยกเว้นช่วงยกเว้น) · เดือนที่ยังไม่มีตาราง ระบบนับเฉพาะวันที่มาจริง · การลาหักเฉพาะวันในตาราง</p>' +
+    '<div class="ros-head"><button class="btn sm" type="button" data-ros-nav="-1">‹</button><span class="ros-month">' + esc(thMonth(k, true)) + '</span>' +
+    '<button class="btn sm" type="button" data-ros-nav="1">›</button>' +
+    (people.length ? '<button class="btn sm" type="button" data-ros-copy>คัดลอกวันในสัปดาห์จากเดือนก่อน</button>' : '') + '</div>' +
+    (people.length ? '<div class="ros-wrap"><table class="ros-grid">' + head + '<tbody>' + body + '</tbody></table></div>'
+      : '<div class="empty">ยังไม่มีผู้ปฏิบัติงานโครงการที่ใช้ตาราง — เลือกรายชื่อด้านล่างเพื่อเพิ่ม</div>') +
+    '<div class="ros-bar"><select class="inp" id="rosAddSel" style="max-width:320px"><option value="">+ เพิ่มคนที่มาแค่บางวัน…</option>' +
+      others.map(function (p) { return '<option value="' + p.personId + '">' + esc(p.fullName) + (p.ward ? ' · ' + esc(p.ward) : '') + '</option>'; }).join('') +
+    '</select><span class="muted small">เริ่มใช้ตารางตั้งแต่เดือนที่เปิดอยู่</span></div>' +
+    '<div class="actions"><button class="btn" data-close>ปิด</button>' +
+    '<button class="btn primary" type="button" id="rosSave"' + (dirtyN ? '' : ' disabled') + '>บันทึกตาราง' + (dirtyN ? ' (' + dirtyN + ' คน)' : '') + '</button></div>');
+  $('#modal').classList.add('wide');
+  $('#modal').setAttribute('data-ros', '1');
+}
+function rosSave() {
+  var ids = Object.keys(ROSU.dirty); if (!ids.length || ROSU.busy) return;
+  ROSU.busy = true;
+  var b = $('#rosSave'); if (b) { b.disabled = true; b.textContent = 'กำลังบันทึก…'; }
+  var rows = ids.map(function (pid) { return { personId: pid, dates: Object.keys(ROSU.draft[pid] || {}).sort() }; });
+  call('apiRosterSave', st.token, ROSU.ym, rows).then(function (r) {
+    (r.rows || []).forEach(function (x) {
+      var m = ROS.days[x.personId] = ROS.days[x.personId] || {};
+      if (x.dates.length) { var set = {}; x.dates.forEach(function (d) { set[d] = 1; }); m[r.month] = set; } else delete m[r.month];
+    });
+    try { wdMemo = {}; } catch (e) { /* - */ }
+    ROSU.dirty = {};
+    toast('บันทึกตาราง ' + thMonth(r.month, true) + ' แล้ว ' + (r.rows || []).length + ' คน');
+    rosRender();
+  }).catch(function (e) { handleErr(e); rosRender(); }).then(function () { ROSU.busy = false; });
+}
+function rosModeSet(pid, on) {
+  return call('apiRosterMode', st.token, pid, on ? 'ROSTER' : '', on ? ROSU.ym : '').then(function (r) {
+    if (r.mode) ROS.mode[pid] = r.since || ''; else delete ROS.mode[pid];
+    try { wdMemo = {}; } catch (e) { /* - */ }
+    if (on && !ROSU.draft[pid]) ROSU.draft[pid] = {};
+    if (!on) { delete ROSU.draft[pid]; delete ROSU.dirty[pid]; }
+    rosRender();
+  }).catch(handleErr);
+}
+document.addEventListener('click', function (e) {
+  var t;
+  if ((t = e.target.closest('[data-ros-open]'))) { e.preventDefault(); rosOpen(); return; }
+  if (!$('#modal') || !$('#modal').getAttribute('data-ros')) return;
+  if ((t = e.target.closest('[data-ros-cell]'))) {
+    var k = t.getAttribute('data-ros-cell').split('|'), set = ROSU.draft[k[0]] || (ROSU.draft[k[0]] = {});
+    if (set[k[1]]) delete set[k[1]]; else set[k[1]] = 1;
+    ROSU.dirty[k[0]] = 1;
+    t.classList.toggle('on', !!set[k[1]]); t.textContent = set[k[1]] ? '✓' : '';
+    var sv = $('#rosSave'), n = Object.keys(ROSU.dirty).length;
+    if (sv) { sv.disabled = !n; sv.textContent = 'บันทึกตาราง (' + n + ' คน)'; }
+    return;
+  }
+  if ((t = e.target.closest('[data-ros-nav]'))) {
+    if (Object.keys(ROSU.dirty).length && !confirm('มีตารางที่ยังไม่บันทึก เปลี่ยนเดือนแล้วการแก้ไขจะหายไป ต้องการเปลี่ยนเดือนหรือไม่')) return;
+    ROSU.ym = rosYmShift(ROSU.ym, +t.getAttribute('data-ros-nav')); rosDraftReset(); rosRender(); return;
+  }
+  if (e.target.closest('[data-ros-copy]')) {
+    var prev = rosYmShift(ROSU.ym, -1), days = rosDaysOf(ROSU.ym), changed = 0;
+    rosPeople().forEach(function (p) {
+      var src = ROS.days[p.personId] && ROS.days[p.personId][prev];
+      if (!src || !rosOn(p, ROSU.ym + '-01')) return;
+      var wds = {}; Object.keys(src).forEach(function (d) { wds[wd(d)] = 1; });
+      var set = {}; days.forEach(function (d) { if (wds[wd(d)] && !(IX.hol && IX.hol[d])) set[d] = 1; });
+      ROSU.draft[p.personId] = set; ROSU.dirty[p.personId] = 1; changed++;
+    });
+    if (!changed) return toast('เดือนก่อนยังไม่มีตารางให้คัดลอก', true);
+    toast('คัดลอกวันในสัปดาห์จากเดือนก่อนให้ ' + changed + ' คน (ข้ามวันหยุดราชการ) — ตรวจแล้วกดบันทึก');
+    rosRender(); return;
+  }
+  if ((t = e.target.closest('[data-ros-off]'))) {
+    e.preventDefault();
+    var p = IX.people[t.getAttribute('data-ros-off')];
+    if (!confirm('นำ ' + (p ? p.fullName : '') + ' ออกจากการใช้ตาราง? ระบบจะกลับไปคิดตามรอบวันทำการของโครงการ (ตารางที่บันทึกไว้ยังเก็บอยู่)')) return;
+    rosModeSet(t.getAttribute('data-ros-off'), false); return;
+  }
+  if (e.target.id === 'rosSave') { rosSave(); return; }
+});
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'rosAddSel' || !e.target.value) return;
+  var pid = e.target.value; e.target.disabled = true;
+  rosModeSet(pid, true);
+});
+$('#modalBg').addEventListener('click', function (e) {
+  if (e.target === this || e.target.closest('[data-close]')) {
+    var wasRos = $('#modal').getAttribute('data-ros');
+    $('#modal').removeAttribute('data-ros');
+    if (wasRos && st.page) { try { rerender(); } catch (x) { /* - */ } }   // ตัวเลขทุกหน้าคิดใหม่ตามตาราง
+  }
+}, true);
+
+// ------------------------------------------------------------------ ทางเข้า: หน้า ผู้ใช้ + งานค้างบนหน้าภาพรวม
+(function () {
+  if (RENDER.users) {
+    var baseUsers = RENDER.users;
+    RENDER.users = function () {
+      baseUsers.apply(this, arguments);
+      if (!isStaff() || ROS.off || $('#rosUsersBar')) return;
+      var tabs = $('#userTabs'); if (!tabs) return;
+      var miss = rosMissing(ym(st.d.today)).length;
+      tabs.insertAdjacentHTML('afterend', '<div class="ros-bar" id="rosUsersBar"><button class="btn sm primary" type="button" data-ros-open>📅 ตารางวันมาปฏิบัติงาน (คนที่มาแค่บางวัน)</button>' +
+        '<span class="muted small">' + rosPeople().length + ' คนใช้ตาราง' + (miss ? ' · <span class="t-warn">ยังไม่มีตารางเดือนนี้ ' + miss + ' คน</span>' : '') + '</span></div>');
+    };
+  }
+  if (typeof renderQueue === 'function') {
+    var baseQueue = renderQueue;
+    window.renderQueue = function () {
+      baseQueue.apply(this, arguments);
+      if (ROS.off) return;
+      var miss = rosMissing(ym(st.d.today)).length, q = $('#dashQueue .queue');
+      if (!miss || !q) return;
+      q.insertAdjacentHTML('beforeend', '<button class="q-item on warn" type="button" data-ros-open><b class="num">' + miss + '</b>' +
+        '<span>ยังไม่มีตารางวันมา (เดือนนี้)</span><i>›</i></button>');
+    };
+  }
+})();
+</script>
