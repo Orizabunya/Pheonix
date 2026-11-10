@@ -1,0 +1,2431 @@
+<script>
+'use strict';
+/* Phoenix Workspace — Portal
+ * เข้าสู่ระบบ/สมัคร · หน้าของผู้ปฏิบัติงานโครงการ (ลงเวลา, ยื่นลา, ใบลาของฉัน, การลงเวลา) · ผลสแกนรหัส QR หน้าห้อง (?p=ci)
+ * · จุดลงเวลา (จอ QR หน้าห้อง + สแกนรหัส QR บุคคลสำรอง)
+ * · หน้าฝ่ายเลขานุการโครงการ (ลงเวลา, รับรองใบลา, ผู้ใช้) · ตัวช่วยสรุปการลงเวลาสำหรับรายบุคคล/รายงาน
+ * ทำงานใน scope เดียวกับ App (ใช้ st, IX, $, call, go, RENDER ฯลฯ ร่วมกัน)
+ */
+
+// ================================================================== สิทธิ์ & หน้า
+var PAGES = {
+  SECRETARY: ['dash', 'clock', 'leave2', 'meet', 'report', 'users', 'system', 'station', 'account', 'ci'],
+  MEMBER: ['home', 'leave', 'person', 'mymeet', 'account', 'ci'],
+  STATION: ['station', 'account', 'ci'],
+  PUBLIC: ['dash', 'person', 'meet', 'report']
+};
+var HOME = { SECRETARY: 'dash', MEMBER: 'home', STATION: 'station', PUBLIC: 'dash' };
+var ROLE_TH = { SECRETARY: 'ฝ่ายเลขานุการโครงการ', MEMBER: 'ผู้ปฏิบัติงานโครงการ', STATION: 'จุดลงเวลา', PUBLIC: 'ผู้ชม' };
+var LV_ST = { PENDING: ['รอรับรอง', 'warn'], CERTIFIED: ['✓ บันทึกแล้ว', 'good'], REJECTED: ['✗ ไม่รับรอง', 'bad'],
+  CANCELLED: ['ยกเลิกแล้ว', 'na'], REVOKED: ['เพิกถอนแล้ว', 'bad'] };
+var ACC_ST = { PENDING: ['รออนุมัติ', 'warn'], ACTIVE: ['ใช้งาน', 'good'], SUSPENDED: ['ระงับ', 'bad'], REJECTED: ['ปฏิเสธ', 'na'] };
+var TH_WD_FULL = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+
+function canSee(page) { return (PAGES[st.role] || PAGES.PUBLIC).indexOf(page) !== -1; }
+function homePage() { return HOME[st.role] || 'dash'; }
+function isStaff() { return st.role === 'SECRETARY'; }
+function pill(label, kind) { return '<span class="st ' + (kind || 'na') + '">' + esc(label) + '</span>'; }
+function hmOf(iso) { return iso ? String(iso).slice(11, 16) : ''; }
+/** ป้ายบอกวิธีการลงเวลา + ผลตรวจพิกัด (ใช้ทั้งหน้าจุดลงเวลาและหน้าตรวจสอบ) */
+var METHOD_L = { ROOM: 'QR หน้าห้อง', PIN: 'รหัส 6 หลัก', QR: 'QR ส่วนตัว', SELF: 'ลงเวลาด้วยตนเอง',
+                 PRE: 'ลงเวลาล่วงหน้าก่อนเปิดรับ', MANUAL: 'ฝ่ายเลขานุการโครงการบันทึกแทน' };
+var GEO_TH = { OK: ['อยู่ในพื้นที่ที่กำหนด', 't-good'], FUZZY: ['ตำแหน่งไม่แน่ชัด', 't-warn'],
+               FAR: ['อยู่นอกพื้นที่ที่กำหนด', 't-bad'], NONE: ['ไม่พบข้อมูลตำแหน่ง', 'muted'], OFF: ['', 'muted'] };
+/** ลิงก์เปิด Google Maps ที่พิกัดนี้ในแท็บใหม่ — ไม่ต้องขอ API key */
+function geoMapUrl_(lat, lng) { return 'https://www.google.com/maps?q=' + encodeURIComponent(lat) + ',' + encodeURIComponent(lng); }
+function hasLatLng_(lat, lng) { return lat !== '' && lat != null && lng !== '' && lng != null; }
+/** ป้ายผลตรวจพิกัด — ถ้ามีพิกัดดิบ (lat/lng) แปะไว้ ป้ายจะกดเปิดดูตำแหน่งบน Google Maps ได้ */
+function geoBadge(txt, lat, lng) {
+  var p = String(txt || '').split('|'), g = GEO_TH[p[0]];
+  if (!g || !g[0]) return '';
+  var detail = p[1] ? ' ' + p[1].replace('m', ' ม.') : '';
+  var body = '◉ ' + g[0] + detail;
+  if (hasLatLng_(lat, lng)) {
+    return '<a class="' + g[1] + ' small geo-link" href="' + geoMapUrl_(lat, lng) + '" target="_blank" rel="noopener" ' +
+      'title="' + esc(String(txt)) + ' · แตะเพื่อดูตำแหน่งบน Google Maps">' + body + ' 🗺️</a>';
+  }
+  return '<span class="' + g[1] + ' small" title="' + esc(String(txt)) + '">' + body + '</span>';
+}
+function methodBadge(m) {
+  m = String(m || '').toUpperCase();
+  if (!m || m === 'ROOM' || m === 'QR') return '';
+  return '<span class="muted small">' + esc(METHOD_L[m] || m) + '</span>';
+}
+function toM(t) { return t ? toMin(t) : 0; }
+function nowMin() { var d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
+function workStart() { return S('WORK_START') || '08:00'; }
+function workEnd() { return S('WORK_END') || '16:00'; }
+function clockStart() { return S('CLOCK_START') || st.d.today; }
+/* isWorkday(d) อยู่ใน App.html — ใช้รอบวันทำการโครงการ + ช่วงยกเว้น (Settings.WORK_WEEK / WORK_EXCLUDE) */
+function daysBetween(a, b) { return Math.round((D(b) - D(a)) / 86400000); }
+function initials(n) { n = String(n || '').replace(/^(นางสาว|นาง|นาย|น\.ส\.)\s*/, '').replace(/^[เแโใไ]/, '').trim(); return n ? n.charAt(0).toUpperCase() : '?'; }
+
+function applyRole() {
+  var role = st.role;
+  document.body.setAttribute('data-role', role);
+  $('#topbar').classList.remove('hide');
+  $$('#nav [data-page]').forEach(function (b) { b.classList.toggle('hide', !canSee(b.getAttribute('data-page'))); });
+  $('#tabbar').classList.toggle('hide', role !== 'MEMBER');
+  $('#stationBtn').classList.toggle('hide', role !== 'SECRETARY');
+  $('#supportCta').classList.toggle('hide', role !== 'SECRETARY');
+  var navPerson = $('#nav [data-page="person"]'); if (navPerson) navPerson.textContent = role === 'MEMBER' ? 'สรุปของฉัน' : 'รายบุคคล';
+  renderUserChip();
+}
+function renderUserChip() {
+  var a = st.d && st.d.auth;
+  $('#userName').textContent = a ? a.name : 'เข้าสู่ระบบ';
+  $('#userAvatar').textContent = a ? initials(a.name) : '→';
+  $('#userBtn').title = a ? (ROLE_TH[a.role] || a.role) + ' · บัญชีของฉัน' : 'เข้าสู่ระบบ';
+}
+$('#userBtn').addEventListener('click', function () {
+  if (!st.d || !st.d.auth) return showAuth();
+  go('account');
+});
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-go]');
+  if (b) { e.preventDefault(); go(b.getAttribute('data-go')); return; }
+  var op = e.target.closest('[data-open-person]');
+  if (op) { st.personId = op.getAttribute('data-open-person'); st.pFy = fyOf(st.d.today); go('person'); }
+});
+
+// ================================================================== เข้าสู่ระบบ / สมัคร
+function showAuth(msg) {
+  stopPageTimers();
+  $('#authView').classList.remove('hide');
+  $('#topbar').classList.add('hide'); $('#tabbar').classList.add('hide');
+  $('#main').classList.add('hide');
+  var note = $('#authNote');
+  var routeMsg = ROUTE.p === 'scan' && ROUTE.c ? 'QR ลงเวลา — เข้าสู่ระบบด้วยบัญชีจุดลงเวลาหรือฝ่ายเลขานุการโครงการเพื่อบันทึกเวลา' : '';
+  var ok = false;
+  if (ROUTE.p === 'ci' && !st._routeDone) {
+    if (ROUTE.err) routeMsg = 'QR หน้าห้อง: ' + ROUTE.err;
+    else {
+      ok = true;
+      routeMsg = '✓ สแกนรหัส QR ' + (ROUTE.mode === 'OUT' ? 'ลงเวลากลับ' : 'ลงเวลามาปฏิบัติงาน') + ' แล้ว (' + ROUTE.hm + ' น.) — เข้าสู่ระบบเพื่อบันทึกเวลา' +
+        ' · ทำครั้งเดียว ระบบจะบันทึกไว้ในเครื่องนี้ · ต้องเข้าสู่ระบบภายใน ' + (ROUTE.claimMin || 15) + ' นาที';
+    }
+  }
+  var m = msg || routeMsg;
+  note.textContent = m || ''; note.classList.toggle('hide', !m);
+  note.className = 'note' + (ok && !msg ? ' good' : ' warn') + (m ? '' : ' hide');
+  var u = $('#loginForm [name=username]'); if (u && !u.value) u.value = store('px_user') || '';
+  setTimeout(function () { var f = u && u.value ? $('#loginForm [name=password]') : u; if (f) f.focus(); }, 50);
+}
+function hideAuth() {
+  $('#authView').classList.add('hide');
+  $('#main').classList.remove('hide');
+}
+$('#authTabs').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-at]'); if (!b) return;
+  var t = b.getAttribute('data-at');
+  $$('#authTabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
+  $('#loginForm').classList.toggle('hide', t !== 'login'); $('#regForm').classList.toggle('hide', t !== 'register');
+  $('#authNote').classList.add('hide');
+});
+$('#regStaff').addEventListener('change', function () { $('#regPinBox').classList.toggle('hide', !this.checked); });
+(function () {
+  var sap = $('#regForm [name=sap]'), un = $('#regForm [name=username]'), last = '';
+  sap.addEventListener('input', function () {
+    if (!un.value || un.value === last) { un.value = sap.value.replace(/\D/g, ''); last = un.value; }
+  });
+})();
+$('#loginForm').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var f = this, b = $('#loginGo');
+  var u = f.username.value.trim(), p = f.password.value;
+  if (!u || !p) return;
+  b.disabled = true; b.textContent = 'กำลังเข้าสู่ระบบ…';
+  call('apiLogin', u, p, navigator.userAgent).then(function (r) {
+    st.token = r.token; store('px_tok', r.token); store('px_user', u);
+    f.password.value = '';
+    st.page = ''; st.personId = '';
+    $('#loading').classList.remove('hide');
+    $('#loading').innerHTML = '<div class="spin"></div><div>กำลังโหลดข้อมูล…</div>';
+    hideAuth();
+    return load(false);
+  }).catch(function (err) {
+    var n = $('#authNote'); n.textContent = err.message; n.classList.remove('hide');
+  }).then(function () { b.disabled = false; b.textContent = 'เข้าสู่ระบบ'; });
+});
+$('#regForm').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var f = this, b = $('#regGo'), o = {};
+  ['fullName', 'sap', 'username', 'password', 'confirm', 'email', 'phone', 'team', 'ward', 'division', 'staffPin'].forEach(function (n) { o[n] = f[n].value.trim(); });
+  if (!$('#regStaff').checked) o.staffPin = '';
+  var n = $('#authNote');
+  var pwErr = pwBad(o.password);
+  if (pwErr) { n.textContent = pwErr; n.classList.remove('hide'); return; }
+  if (o.password !== o.confirm) { n.textContent = 'การยืนยันรหัสผ่านไม่ตรงกัน'; n.classList.remove('hide'); return; }
+  b.disabled = true;
+  call('apiRegister', o).then(function (r) {
+    store('px_user', o.username);
+    f.reset(); $('#regPinBox').classList.add('hide');
+    $$('#authTabs button')[0].click();
+    $('#loginForm [name=username]').value = o.username;
+    n.className = 'note'; n.textContent = r.message; n.classList.remove('hide');
+    setTimeout(function () { n.className = 'note warn' + (n.classList.contains('hide') ? ' hide' : ''); }, 12000);
+  }).catch(function (err) { n.className = 'note warn'; n.textContent = err.message; n.classList.remove('hide'); })
+    .then(function () { b.disabled = false; });
+});
+function logout() {
+  call('apiLogout', st.token).catch(function () {});
+  st.token = ''; store('px_tok', null); st.d = null; st.role = ''; st.page = '';
+  showAuth('ออกจากระบบแล้ว');
+}
+$('#logoutBtn').addEventListener('click', logout);
+
+// คำแนะนำกฎรหัสผ่าน (มาตรฐาน HIA) — บอกผลขณะพิมพ์ทั้งหน้าสมัครและหน้าบัญชีของฉัน
+pwWatch($('#regForm [name=password]'), $('#regPwHint'));
+pwWatch($('#pwNew'), $('#pwHint'));
+
+function openPasswordModal(force) {
+  openModal('<h3>' + (force ? 'ตั้งรหัสผ่านใหม่' : 'เปลี่ยนรหัสผ่าน') + '</h3><p class="muted small">' + (force ? 'ฝ่ายเลขานุการโครงการกำหนดรหัสผ่านใหม่ให้ท่าน กรุณาตั้งรหัสผ่านใหม่ก่อนใช้งาน' : '') + '</p>' +
+    '<div class="form-grid"><div class="field full"><label>รหัสผ่านปัจจุบัน (ที่ได้รับ)</label><input class="inp" type="password" id="mpOld"></div>' +
+    '<div class="field"><label>รหัสผ่านใหม่</label><input class="inp" type="password" id="mpNew"><small class="fhint" id="mpHint"></small></div>' +
+    '<div class="field"><label>ยืนยัน</label><input class="inp" type="password" id="mpNew2"></div></div>' +
+    '<div class="actions">' + (force ? '' : '<button class="btn" data-close>ยกเลิก</button>') + '<button class="btn primary" id="mpGo">บันทึก</button></div>');
+  if (force) $('#modalBg').setAttribute('data-lock', '1');
+  pwWatch($('#mpNew'), $('#mpHint'));
+  $('#mpGo').onclick = function () {
+    var pwErr = pwBad($('#mpNew').value); if (pwErr) return toast(pwErr, true);
+    if ($('#mpNew').value !== $('#mpNew2').value) return toast('การยืนยันรหัสผ่านไม่ตรงกัน', true);
+    var b = this; b.disabled = true;
+    call('apiChangePassword', st.token, $('#mpOld').value, $('#mpNew').value).then(function () {
+      $('#modalBg').removeAttribute('data-lock'); closeModal(); toast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
+      if (st.d.me) st.d.me.mustChangePw = false;
+    }).catch(function (e) { handleErr(e); b.disabled = false; });
+  };
+}
+
+// ================================================================== ดัชนีการลงเวลา + badge
+function buildIndexLite() {
+  IX.types = {}; (st.d.types || []).forEach(function (t) { IX.types[t.code] = t; });
+  IX.typeOrder = (st.d.types || []).slice().sort(function (a, b) { return (+a.order || 99) - (+b.order || 99); }).map(function (t) { return t.code; });
+  IX.hol = {}; (st.d.holidays || []).forEach(function (h) { IX.hol[h.date] = h; });
+  IX.people = {}; IX.att = {}; IX.dayRec = {};
+}
+function buildAttIndex() {
+  IX.att = {}; IX.dayRec = {};
+  (st.d.attendance || []).forEach(function (r) { IX.att[r.personId + '|' + r.date] = r; });
+  (st.d.records || []).forEach(function (r) { (IX.dayRec[r.personId + '|' + r.date] = IX.dayRec[r.personId + '|' + r.date] || []).push(r); });
+  IX.eaByMeet = {}; IX.meetById = {};
+  (st.d.meetings || []).forEach(function (m) { IX.meetById[m.meetingId] = m; });
+  (st.d.eventAtt || []).forEach(function (r) { (IX.eaByMeet[r.meetingId] = IX.eaByMeet[r.meetingId] || []).push(r); });
+  // ช่วงเวลาประชุมภายในที่รับรองแล้ว แยกตาม คน|วัน — ใช้บวกเป็นเวลาปฏิบัติงาน
+  IX.meetByPD = {};
+  var mm = {};
+  (st.d.meetings || []).forEach(function (m) {
+    if (String(m.scope || '') === 'INTERNAL' && m.status !== 'CERTIFIED') return;
+    mm[m.meetingId] = m;
+  });
+  (st.d.eventAtt || []).forEach(function (r) {
+    var m = mm[r.meetingId]; if (!m) return;
+    var a = hmOf(r.inAt) || m.startTime, b = hmOf(r.outAt) || m.endTime;
+    if (!a || !b || toM(b) <= toM(a)) return;
+    var d = m.date || String(r.inAt).slice(0, 10);
+    (IX.meetByPD[r.personId + '|' + d] = IX.meetByPD[r.personId + '|' + d] || []).push([toM(a), toM(b)]);
+  });
+}
+/** รวมช่วงเวลาที่ทับกันให้เป็นช่วงเดียว แล้วคืนจำนวนนาทีรวม + นาทีที่อยู่นอกเวลาราชการ */
+function mergeSpans(spans, dayStart, dayEnd) {
+  if (!spans.length) return { min: 0, out: 0 };
+  var a = spans.slice().sort(function (x, y) { return x[0] - y[0]; });
+  var out = [a[0].slice()];
+  for (var i = 1; i < a.length; i++) {
+    var last = out[out.length - 1];
+    if (a[i][0] <= last[1]) { if (a[i][1] > last[1]) last[1] = a[i][1]; }
+    else out.push(a[i].slice());
+  }
+  var tot = 0, outside = 0;
+  out.forEach(function (sp) {
+    tot += sp[1] - sp[0];
+    if (dayStart == null) { outside += sp[1] - sp[0]; return; }
+    outside += Math.max(0, Math.min(sp[1], dayStart) - sp[0]) + Math.max(0, sp[1] - Math.max(sp[0], dayEnd));
+  });
+  return { min: tot, out: outside };
+}
+function updateBadges() {
+  buildAttIndex();
+  var d = st.d, staff = isStaff();
+  var pend = (d.leaveReqs || []).filter(function (q) { return q.status === 'PENDING'; }).length;
+  var accP = (d.accounts || []).filter(function (a) { return a.status === 'PENDING'; }).length;
+  function set(id, n, on) { var el = $(id); if (!el) return; el.textContent = n; el.classList.toggle('hide', !(on && n)); }
+  // Leave รวมสองงานที่เคยอยู่คนละเมนู: ใบลาที่ยังค้าง + รายการที่ต้องตรวจสอบ (สูตรเดิมของ #certBadge และ #reviewBadge)
+  var rv = (d.records || []).filter(function (r) { return r.flag === 'REVIEW' || r.type === 'UNSPEC'; }).length +
+           ((IX.gaps || []).length);
+  set('#leaveBadge', pend + rv, staff);
+  set('#userBadge', accP, staff); set('#myLeaveBadge', pend, st.role === 'MEMBER');
+  var me = (d.auth && d.auth.personId) || '';
+  var intPend = (d.meetings || []).filter(function (m) { return String(m.scope || '') === 'INTERNAL' && m.status === 'PENDING'; });
+  set('#intBadge', intPend.length, staff); set('#maBadge', intPend.length, staff);
+  set('#meetBadge', intPend.length, staff);
+  set('#mmBadge', intPend.filter(function (m) {
+    return m.ownerId === me || (d.eventAtt || []).some(function (r) { return r.meetingId === m.meetingId && r.personId === me; });
+  }).length, st.role === 'MEMBER');
+}
+
+/** สถานะการลงเวลาของคนหนึ่งในวันหนึ่ง */
+function dayStatus(p, d) {
+  var row = IX.att[p.personId + '|' + d], recs = IX.dayRec[p.personId + '|' + d] || [];
+  var full = recs.filter(function (r) { return r.fullDay === 'Y'; })[0];
+  var fullOff = full && isOffDuty(full.type);
+  var today = st.d.today, past = d < today || (d === today && nowMin() >= toM(workEnd()));
+  var o = { row: row, recs: recs, full: full };
+  if (row && !isWorkday(d)) {
+    o.code = 'EXTRA';              // มาปฏิบัติงานวันนอกรอบ/วันหยุด = ปฏิบัติงานนอกเวลา ไม่นับเป็นวันทำงานหรือมาหลังเวลา
+    o.noOut = !row.outAt && d < today;
+  } else if (row) {
+    o.code = Number(row.lateMin) > 0 ? 'LATE' : 'IN';
+    o.noOut = !row.outAt && (d < today || (d === today && nowMin() >= toM(workEnd()) + 60));
+  } else if (fullOff) o.code = 'OFFDUTY';
+  else if (full) o.code = 'LEAVE';
+  else if (!isWorkday(d)) o.code = 'OFF';
+  else if (d < clockStart()) o.code = 'NA';
+  else if (pendingOffDuty_(p.personId, d)) o.code = 'OFFWAIT';
+  else o.code = past ? 'ABSENT' : 'WAIT';
+  return o;
+}
+/** มีใบวันหยุดตามรอบเวรสถานะ PENDING ครอบวันนี้ไหม (ยื่นแบบช่วงวันหรือ dateList) — ดู IX.offWaitPD (ดัชนี personId|date สร้างครั้งเดียวต่อการโหลดใน buildIndex) */
+function pendingOffDuty_(personId, d) {
+  return !!(IX.offWaitPD && IX.offWaitPD[personId + '|' + d]);
+}
+var DS_LABEL = { IN: ['มาปฏิบัติงาน', 'good'], LATE: ['มาหลังเวลาที่กำหนด', 'warn'], LEAVE: ['ลา', 'info'], ABSENT: ['ไม่พบการลงเวลา', 'bad'], WAIT: ['ยังไม่ได้ลงเวลา', 'na'], OFF: ['วันหยุด', 'na'], NA: ['–', 'na'],
+                OFFDUTY: ['หยุดตามเวร', 'na'], OFFWAIT: ['รอรับรอง', 'info'], EXTRA: ['ปฏิบัติงานนอกวันทำการ', 'info'] };
+/**
+ * ตัวเลข "มาหลังเวลา/กลับก่อนเวลา" แสดงเฉพาะฝ่ายเลขานุการโครงการ — ฝั่งผู้ใช้เห็นเป็นเวลาเข้างาน/เวลากลับแทน
+ * ระบบยังเก็บค่า lateMin/earlyMin ไว้ครบเหมือนเดิม เปลี่ยนเฉพาะการแสดงผล
+ */
+function seeLate() { return st.role === 'SECRETARY'; }
+function dsLabel(code) { return (code === 'LATE' && !seeLate()) ? DS_LABEL.IN : DS_LABEL[code]; }
+
+/** สรุปการลงเวลาของคนหนึ่งในช่วงวันที่ */
+function attStats(p, from, to, daily) {
+  var w = pWindow(p), s = from > w.s ? from : w.s, e = to < w.e ? to : w.e;
+  if (e > st.d.today) e = st.d.today;
+  var o = { work: 0, present: 0, late: 0, lateMin: 0, early: 0, earlyMin: 0, noOut: 0, absent: 0, leave: 0, tracked: 0,
+            offDuty: 0, inSum: 0, inN: 0, outSum: 0, outN: 0, workMin: 0, clockMin: 0, meetMin: 0, otMin: 0, meetDays: 0 };
+  for (var d = s; d <= e; d = addDays(d, 1)) {
+    if (!isWorkday(d)) continue;
+    var x = dayStatus(p, d);
+    if (x.code === 'NA') { if (x.row) o.present++; continue; }
+    if (x.code === 'OFFDUTY') { o.offDuty++; continue; }
+    o.tracked++;
+    var dy = daily ? (daily[d] || (daily[d] = { work: 0, present: 0, leave: 0 })) : null;
+    if (x.code === 'OFFWAIT') { o.work++; if (dy) dy.work++; continue; }
+    if (x.code === 'LEAVE') { o.leave++; if (dy) dy.leave++; continue; }
+    if (x.code === 'WAIT') continue;
+    o.work++; if (dy) dy.work++;
+    if (x.row) {
+      o.present++; if (dy) dy.present++;
+      if (Number(x.row.lateMin) > 0) { o.late++; o.lateMin += Number(x.row.lateMin); }
+      if (Number(x.row.earlyMin) > 0) { o.early++; o.earlyMin += Number(x.row.earlyMin); }
+      if (x.noOut) o.noOut++;
+      var hi = hmOf(x.row.inAt); if (hi) { o.inSum += toM(hi); o.inN++; }
+      var ho = hmOf(x.row.outAt); if (ho) { o.outSum += toM(ho); o.outN++; }
+      if (hi && ho && toM(ho) > toM(hi)) o.clockMin += toM(ho) - toM(hi);
+    } else if (x.code === 'ABSENT') o.absent++;
+  }
+  // เวลาปฏิบัติงาน = ช่วงที่ลงเวลามา-กลับ รวมกับช่วงประชุมภายในที่รับรองแล้ว (ช่วงที่ทับกันนับครั้งเดียว)
+  var ws = toM(workStart()), we = toM(workEnd());
+  for (var dd = s; dd <= e; dd = addDays(dd, 1)) {
+    var rowD = IX.att[p.personId + '|' + dd], mts = IX.meetByPD[p.personId + '|' + dd] || [];
+    var spans = mts.slice();
+    var ai = rowD && hmOf(rowD.inAt), ao = rowD && hmOf(rowD.outAt);
+    if (ai && ao && toM(ao) > toM(ai)) spans.push([toM(ai), toM(ao)]);
+    if (!spans.length) continue;
+    if (mts.length) o.meetDays++;
+    var wd2 = isWorkday(dd);
+    var mg = mergeSpans(spans, wd2 ? ws : null, wd2 ? we : null);
+    o.workMin += mg.min;
+    o.otMin += mg.out;
+    o.meetMin += mergeSpans(mts, null, null).min;
+  }
+  o.onTime = o.work ? (o.present - o.late) / o.work : null;
+  o.rate = o.work ? o.present / o.work : null;
+  o.inAvg = o.inN ? minToHm(Math.round(o.inSum / o.inN)) : '';
+  o.outAvg = o.outN ? minToHm(Math.round(o.outSum / o.outN)) : '';
+  return o;
+}
+function minToHm(m) { m = Math.max(0, m); return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2); }
+function attCells(o) {
+  if (!o.tracked && !o.present) return '<td class="r muted" colspan="7">ยังไม่ใช้ระบบลงเวลา</td>';
+  var mid = seeLate()
+    ? '<td class="r num">' + (o.late ? '<b class="t-warn">' + o.late + '</b> <span class="muted small">(' + o.lateMin + ' น.)</span>' : '–') + '</td>' +
+      '<td class="r num">' + (o.early || '–') + '</td>'
+    : '<td class="r num">' + (o.inAvg || '–') + '</td><td class="r num">' + (o.outAvg || '–') + '</td>';
+  var last = seeLate() ? o.onTime : o.rate;
+  return '<td class="r num">' + o.work + '</td><td class="r num">' + o.present + '</td>' + mid +
+    '<td class="r num">' + (o.noOut ? '<b class="t-warn">' + o.noOut + '</b>' : '–') + '</td>' +
+    '<td class="r num">' + (o.absent ? '<b class="t-bad">' + o.absent + '</b>' : '–') + '</td>' +
+    '<td>' + (last == null ? '<span class="muted">–</span>' : pctBar(last)) + '</td>';
+}
+function attHead() {
+  return '<th class="r">วันทำงาน</th><th class="r">มาปฏิบัติงาน</th>' +
+    (seeLate() ? '<th class="r">มาหลังเวลาที่กำหนด</th><th class="r">กลับก่อนเวลา</th>'
+               : '<th class="r">เวลาเข้างาน</th><th class="r">เวลากลับ</th>') +
+    '<th class="r">ไม่ได้ลงเวลากลับ</th><th class="r">ไม่พบการลงเวลา</th><th>' + (seeLate() ? 'ตรงเวลา' : 'อัตราการมา') + '</th>';
+}
+function pctBar(p) {
+  return '<div class="meter"><div class="track"><div class="fill' + (p < 0.9 ? ' bad' : '') + '" style="width:' + Math.round(p * 100) + '%"></div></div><b class="num" style="min-width:48px;text-align:right">' + Math.round(p * 100) + '%</b></div>';
+}
+
+// ================================================================== ผู้ปฏิบัติงานโครงการ: QR ลงเวลา
+var QR = { codes: [], offset: 0, stepSec: 30, tick: null, fetching: false, fetchedAt: 0, shown: '', att: null, lock: null, show: false };
+RENDER.home = function () {
+  var me = st.d.me || {}, p = IX.people[st.d.auth.personId] || {};
+  $('#qrName').textContent = p.fullName || me.fullName || '';
+  $('#qrSub').textContent = [p.sap ? 'SAP ' + p.sap : '', p.ward, 'Team ' + (TEAM_L[p.team] || '')].filter(Boolean).join(' · ');
+  QR.att = IX.att[p.personId + '|' + st.d.today] || null;
+  renderTodayPanel();
+  showPersonalQr(QR.show);
+  selfLoad();
+  RENDER.mytime();          // ประวัติการลงเวลาอยู่ในหน้านี้แล้ว (หุบไว้)
+};
+
+// ================================================================== ลงเวลาด้วยตนเอง
+var SELF = { state: null, busy: false };
+var GEO_CLS = { OK: 't-good', FUZZY: 't-warn', FAR: 't-bad', NONE: 'muted', OFF: 'muted' };
+
+/** ขอพิกัดจากเบราว์เซอร์ — ไม่สำเร็จก็ยังลงชื่อได้ (ระบบติดป้ายไว้แทนการบล็อก) */
+function selfGeo() {
+  return new Promise(function (done) {
+    if (!navigator.geolocation) return done({ err: 'NO_API' });
+    var finished = false;
+    var to = setTimeout(function () { if (!finished) { finished = true; done({ err: 'TIMEOUT' }); } }, 9000);
+    try {
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        if (finished) return; finished = true; clearTimeout(to);
+        done({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: Math.round(pos.coords.accuracy || 0) });
+      }, function (e) {
+        if (finished) return; finished = true; clearTimeout(to);
+        done({ err: e && e.code === 1 ? 'DENIED' : 'FAIL' });
+      }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+    } catch (e) { clearTimeout(to); done({ err: 'FAIL' }); }
+  });
+}
+
+function selfLoad() {
+  if (!$('#selfCard') || st.role !== 'MEMBER') return;
+  call('apiSelfState', st.token).then(function (o) {
+    SELF.state = o;
+    // รอบเพิ่งเปิดในคำขอนี้ (คำขอที่ค้างถูกนับให้แล้ว) → ข้อมูลที่โหลดไว้เก่าแล้ว
+    if (o.refresh) return load(true);
+    renderSelf();
+  }).catch(function () { $('#selfCard').classList.add('hide'); });
+}
+
+function renderSelf() {
+  var o = SELF.state, card = $('#selfCard');
+  if (!card) return;
+  card.classList.toggle('hide', !o || !o.on);
+  if (!o || !o.on) return;
+  var inM = o.modes.IN || {}, outM = o.modes.OUT || {};
+  function winLine(label, m) {
+    if (!m.range) return '<div class="self-w"><span>' + label + '</span><b class="muted">ไม่ได้ตั้งช่วงเวลาไว้</b></div>';
+    var cls = m.inRange ? 't-good' : m.before ? 't-warn' : 'muted';
+    var txt = m.inRange ? 'เปิดรับอยู่ ถึง ' + m.toHm + ' น.' : m.before ? 'เปิดรับเวลา ' + m.fromHm + ' น.' : 'หมดช่วงเวลาแล้ว';
+    return '<div class="self-w"><span>' + label + ' <em class="muted">' + m.range + '</em></span><b class="' + cls + '">' + txt + '</b></div>';
+  }
+  $('#selfWin').innerHTML = (o.workday ? '' : '<div class="note warn" style="margin-bottom:10px">วันนี้ไม่ใช่วันทำการ</div>') +
+    winLine('ลงเวลามาปฏิบัติงาน', inM) + winLine('ลงเวลากลับ', outM);
+  var att = IX.att[(st.d.auth.personId || '') + '|' + st.d.today] || null;
+  $('#selfIn').disabled = !!(att && att.inAt);
+  $('#selfIn').textContent = att && att.inAt ? 'ลงเวลามาปฏิบัติงานแล้ว ' + hmOf(att.inAt) + ' น.' : 'ลงเวลามาปฏิบัติงาน';
+  $('#selfOut').disabled = !(att && att.inAt) || !!(att && att.outAt);
+  $('#selfOut').textContent = att && att.outAt ? 'ลงเวลากลับแล้ว ' + hmOf(att.outAt) + ' น.' : 'ลงเวลากลับ';
+  $('#selfPre').innerHTML = (o.pre || []).map(function (r) {
+    return '<div class="self-pre"><div><b>คำขอลงเวลา' + (r.mode === 'OUT' ? 'กลับ' : 'มาปฏิบัติงาน') + ' ' + esc(r.time) + ' น.</b>' +
+      '<span class="muted small">ระบบจะนับให้เมื่อถึงเวลาเปิดรับ</span></div>' +
+      '<button class="btn sm" data-pre-cancel="' + esc(r.preId) + '">ยกเลิก</button></div>';
+  }).join('');
+  $('#selfGeoNote').textContent = o.hasRef
+    ? 'ระบบจะขอตำแหน่งเพื่อตรวจว่าอยู่ในระยะ ' + o.radius + ' เมตรจากจุดที่ตั้งไว้ · ฝ่ายเลขานุการโครงการดูตำแหน่งที่บันทึกไว้บนแผนที่ได้'
+    : 'ยังไม่ได้ตั้งจุดอ้างอิงพิกัด ระบบจึงยังไม่ตรวจระยะ';
+}
+
+function selfGo(mode) {
+  if (SELF.busy) return;
+  SELF.busy = true;
+  var btn = $(mode === 'OUT' ? '#selfOut' : '#selfIn'), old = btn.textContent;
+  btn.disabled = true; btn.textContent = 'กำลังขอตำแหน่ง…';
+  selfGeo().then(function (g) {
+    btn.textContent = 'กำลังบันทึก…';
+    return call('apiSelfClock', st.token, { mode: mode, lat: g.lat, lng: g.lng, acc: g.acc, deviceId: deviceId() });
+  }).then(function (res) {
+    var geo = res.geo || {}, cls = GEO_CLS[geo.status] || 'muted';
+    var line = geo.status === 'OK' || geo.status === 'FUZZY' || geo.status === 'FAR'
+      ? '<span class="' + cls + '">' + esc(geo.label) + (geo.dist != null ? ' · ห่าง ' + geo.dist.toLocaleString() + ' ม. (±' + geo.acc + ' ม.)' : '') + '</span>'
+      : '<span class="muted">' + esc(geo.label || '') + '</span>';
+    $('#selfRes').classList.remove('hide');
+    $('#selfRes').innerHTML = '<b class="' + (res.action === 'PRE' || res.action === 'PRE_DUP' ? 't-warn' : 't-good') + '">' +
+      esc(res.message || 'บันทึกเรียบร้อยแล้ว') + '</b>' + (geo.label ? '<div class="small">' + line + '</div>' : '') +
+      (res.deviceWarning ? '<div class="small t-warn">⚠ ' + esc(res.deviceWarning) + '</div>' : '');
+    toast(res.action === 'PRE' ? 'บันทึกคำขอลงเวลาไว้แล้ว' : 'บันทึกเรียบร้อยแล้ว');
+    return load(true);
+  }).catch(function (e) { handleErr(e); btn.textContent = old; })
+    .then(function () { SELF.busy = false; selfLoad(); });
+}
+if ($('#selfIn')) $('#selfIn').addEventListener('click', function () { selfGo('IN'); });
+if ($('#selfOut')) $('#selfOut').addEventListener('click', function () { selfGo('OUT'); });
+if ($('#selfPre')) $('#selfPre').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-pre-cancel]'); if (!b) return;
+  b.disabled = true;
+  call('apiPreCancel', st.token, b.getAttribute('data-pre-cancel'))
+    .then(function () { toast('ยกเลิกคำขอแล้ว'); selfLoad(); })
+    .catch(function (er) { handleErr(er); b.disabled = false; });
+});
+/** QR ส่วนตัว (ทางสำรอง) — เปิดเมื่อกดปุ่มเท่านั้น */
+function showPersonalQr(on) {
+  QR.show = !!on;
+  $('#qrCard').classList.toggle('hide', !QR.show);
+  $('#qrToggle').textContent = QR.show ? 'ซ่อน QR ส่วนตัว' : 'แสดง QR ส่วนตัว (สำรอง — ให้จุดลงเวลาสแกน)';
+  clearInterval(QR.tick); QR.tick = null;
+  if (QR.lock) { try { QR.lock.release(); } catch (e) { /* - */ } QR.lock = null; }
+  if (!QR.show) return;
+  fetchQr();
+  QR.tick = setInterval(qrTick, 1000); qrTick();
+  try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(function (l) { QR.lock = l; }).catch(function () {}); } catch (e) { /* ไม่รองรับ */ }
+}
+$('#qrToggle').addEventListener('click', function () {
+  showPersonalQr(!QR.show);
+  if (QR.show) setTimeout(function () { $('#qrCard').scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 60);
+});
+function pinSubmit(inp, btn) {
+  var v = String(inp.value || '').replace(/\D/g, '');
+  if (v.length !== 6) { toast('กรุณากรอกรหัสให้ครบ 6 หลัก', true); inp.focus(); return; }
+  btn.disabled = true;
+  call('apiRoomPin', st.token, v, deviceId()).then(function (r) {
+    inp.value = ''; ciShowResult(r);
+  }).catch(function (e) {
+    if (e.code === 'AUTH') return handleErr(e);
+    toast(e.message, true);
+  }).then(function () { btn.disabled = false; });
+}
+$('#homePinGo').addEventListener('click', function () { pinSubmit($('#homePin'), this); });
+$('#homePin').addEventListener('keydown', function (e) { if (e.key === 'Enter') pinSubmit(this, $('#homePinGo')); });
+function fetchQr() {
+  if (QR.fetching) return;
+  QR.fetching = true;
+  call('apiMyQr', st.token).then(function (d) {
+    QR.codes = d.codes; QR.stepSec = d.stepSec; QR.offset = d.serverMs - Date.now(); QR.fetchedAt = Date.now();
+    if (d.att) { QR.att = d.att; var i = st.d.attendance.findIndex(function (x) { return x.attId === d.att.attId; }); if (i >= 0) st.d.attendance[i] = d.att; else st.d.attendance.push(d.att); buildAttIndex(); }
+    renderTodayPanel(); qrTick();
+  }).catch(function (e) {
+    if (e.code === 'AUTH') return handleErr(e);
+    $('#qrBox').innerHTML = '<div class="qr-err">สร้าง QR ไม่ได้<br><span class="small">' + esc(e.message) + '</span></div>';
+  }).then(function () { QR.fetching = false; });
+}
+function qrTick() {
+  if (st.page !== 'home') return;
+  var now = Date.now() + QR.offset, stepMs = QR.stepSec * 1000;
+  var step = Math.floor(now / stepMs), left = Math.ceil((stepMs - now % stepMs) / 1000);
+  var c = QR.codes.filter(function (x) { return x.step === step; })[0];
+  var d = new Date(now);
+  $('#qrClock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  if (!c) {
+    if (!QR.fetching && (!QR.codes.length || Date.now() - QR.fetchedAt > 5000)) fetchQr();
+    if (QR.codes.length) $('#qrBox').innerHTML = '<div class="qr-err">กำลังสร้าง QR ใหม่…<br><span class="small">ตรวจสอบอินเทอร์เน็ต</span></div>';
+    QR.shown = '';
+    return;
+  }
+  if (QR.shown !== c.code) { drawQr($('#qrBox'), c.url || c.code); QR.shown = c.code; }
+  var ring = $('#qrRing'), C = 2 * Math.PI * 15.5;
+  ring.style.strokeDasharray = C; ring.style.strokeDashoffset = C * (1 - left / QR.stepSec);
+  $('#qrLeft').textContent = 'QR เปลี่ยนใน ' + left + ' วินาที';
+  var remain = QR.codes.filter(function (x) { return x.step > step; }).length;
+  if (remain < 1 && !QR.fetching && Date.now() - QR.fetchedAt > 4000) fetchQr();
+}
+function drawQr(box, text) {
+  if (!window.qrcode) { box.innerHTML = '<div class="qr-err">โหลดตัวสร้าง QR ไม่ได้<br><span class="small mono">' + esc(text.slice(-40)) + '</span></div>'; return; }
+  var q = qrcode(0, 'M'); q.addData(text); q.make();
+  var n = q.getModuleCount(), quiet = 4, size = n + quiet * 2, scale = 8;
+  var cv = document.createElement('canvas'); cv.width = cv.height = size * scale;
+  var g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.fillStyle = '#0f172a';
+  for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+  cv.setAttribute('aria-label', 'QR ลงเวลา'); cv.className = 'qr-canvas';
+  box.innerHTML = ''; box.appendChild(cv);
+}
+function renderTodayPanel() {
+  var p = IX.people[st.d.auth.personId] || {}, a = QR.att, today = st.d.today;
+  var recs = IX.dayRec[p.personId + '|' + today] || [];
+  var pend = (st.d.leaveReqs || []).filter(function (q) { return q.status === 'PENDING'; }).length;
+  var exp = workStart();
+  $('#todayPanel').innerHTML = '<span class="eyebrow">วันนี้</span>' +
+    '<h2 style="margin:12px 0 2px">' + TH_WD_FULL[wd(today)] + ' ' + thDate(today) + '</h2>' +
+    '<p class="muted small" style="margin:0">เวลาเข้างาน ' + exp + ' น. · เลิก ' + workEnd() + ' น.' + (isWorkday(today) ? '' : ' · วันนี้เป็นวันหยุด') + '</p>' +
+    '<div class="tp-grid"><div><span>เข้า</span><b class="num">' + (a ? hmOf(a.inAt) : '–') + '</b>' +
+      (a ? '<em class="t-good">บันทึกแล้ว</em>' : '<em>ยังไม่ได้ลงเวลา</em>') + '</div>' +
+    '<div><span>ออก</span><b class="num">' + (a && a.outAt ? hmOf(a.outAt) : '–') + '</b>' +
+      (a && a.outAt ? '<em class="t-good">บันทึกแล้ว</em>' : '<em>&nbsp;</em>') + '</div></div>' +
+    (recs.length ? '<div class="chips">' + recs.map(function (r) { return '<span class="chip">' + esc(tlabel(r.type)) + ' · ' + (r.fullDay === 'Y' ? 'เต็มวัน' : r.startTime + '–' + r.endTime) + '</span>'; }).join('') + '</div>' : '') +
+    (pend ? '<p class="small" style="margin:10px 0 0;color:#fde68a">ใบลารอรับรอง ' + pend + ' ใบ</p>' : '');
+}
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && st.page === 'home' && QR.show) { fetchQr(); try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(function (l) { QR.lock = l; }).catch(function () {}); } catch (e) { /* - */ } }
+});
+
+function stopPageTimers() {
+  clearInterval(QR.tick); QR.tick = null;
+  if (QR.lock) { try { QR.lock.release(); } catch (e) { /* - */ } QR.lock = null; }
+  clearInterval(SC.timer); SC.timer = null;
+  clearInterval(RM.tick); RM.tick = null;
+  roomFull(false);
+  camStop();
+}
+
+// ================================================================== ผู้ปฏิบัติงานโครงการ: ยื่นลา
+function selfTypes() {
+  var allow = String(S('SELF_LEAVE_TYPES') || '').split(/[,\s]+/).filter(String);
+  var off = String(S('OFF_DUTY_TYPES') || '').split(/[,\s]+/).filter(String);
+  return IX.typeOrder.filter(function (c) { return (!allow.length || allow.indexOf(c) !== -1) || off.indexOf(c) !== -1; });
+}
+function lvSelType() { var root = $('#lvF'); return root ? (($('input[name=type]:checked', root) || {}).value) : ''; }
+function lvRenderDateArea() {
+  var area = $('#lvDateArea'), t0 = st.leaveDraft || {};
+  area.innerHTML = '<div class="field" id="lvFrom"><label>ตั้งแต่วันที่</label><input class="inp" type="date" name="dateFrom" value="' + esc(t0.dateFrom || st.d.today) + '"></div>' +
+    '<div class="field" id="lvTo"><label>ถึงวันที่</label><input class="inp" type="date" name="dateTo" value="' + esc(t0.dateTo || t0.dateFrom || st.d.today) + '"></div>';
+  lvPreview();
+}
+/** ประเภทที่ต้องกรอกหมายเหตุ — ต้องตรงกับ LV_REQ_REASON_TYPES ใน 07_Leave.gs */
+var LV_NOTE_TYPES = ['OFF_HOLIDAY', 'OTHER_UNIT', 'MEETING'];
+function lvNeedNote(type) { return LV_NOTE_TYPES.indexOf(type) !== -1; }
+
+RENDER.leave = function () {
+  var t0 = st.leaveDraft || {};
+  var types = selfTypes();
+  var initType = t0.type || types[0];
+  $('#leaveForm').innerHTML = '<h2>รายละเอียดการแจ้งลา</h2>' +
+    '<div class="form-grid" id="lvF" style="margin-top:14px">' +
+    '<div class="field full"><label>ประเภทการลา / การปฏิบัติงาน</label><div class="type-grid">' + types.map(function (c) {
+      return '<label style="--c:' + tcolor(c) + '"><input type="radio" name="type" value="' + c + '"' + (initType === c ? ' checked' : '') + '><span class="sw" style="background:' + tcolor(c) + '"></span>' + esc(tlabel(c)) + '</label>';
+    }).join('') + '</div></div>' +
+    '<div class="full" id="lvDateArea"></div>' +
+    '<div class="field full" id="lvDur"><label>ช่วงเวลา</label><div class="radio-row">' +
+    [['full', 'เต็มวัน'], ['am', 'ครึ่งเช้า ' + workStart() + '–12:00'], ['pm', 'ครึ่งบ่าย 13:00–' + workEnd()], ['time', 'ระบุเวลา']].map(function (o) {
+      return '<label><input type="radio" name="dur" value="' + o[0] + '"' + ((t0.dur || 'full') === o[0] ? ' checked' : '') + '>' + o[1] + '</label>'; }).join('') + '</div></div>' +
+    timeRange({ label: 'ระบุเวลาเริ่ม – สิ้นสุด', show: 'time', a: 'name="startTime"', av: t0.startTime || '13:00', b: 'name="endTime"', bv: t0.endTime || '15:00' }) +
+    '<div class="field full' + (lvNeedNote(initType) ? '' : ' hide') + '" id="lvReasonWrap"><label>หมายเหตุ *</label><textarea class="inp" name="reason" placeholder="ระบุรายละเอียดของประเภทที่เลือก">' + esc(t0.reason || '') + '</textarea></div>' +
+    '<div class="field full"><label>ลิงก์เอกสารแนบ (ถ้ามี)</label><input class="inp" name="attachUrl" inputmode="url" placeholder="https://drive.google.com/…" value="' + esc(t0.attachUrl || '') + '"></div>' +
+    '<div class="full" id="lvPreview"></div></div>' +
+    '<div class="actions-row"><button class="btn primary block-sm" id="lvGo">บันทึกข้อมูล</button></div>';
+  var root = $('#lvF');
+  $$('.trange-dur', root).forEach(function (el) { el.classList.add('hide'); });   // ไม่แสดงตัวเลขชั่วโมงในหน้านี้
+  root.addEventListener('input', lvPreview); root.addEventListener('change', lvPreview);
+  lvRenderDateArea();
+  $('#leaveRules').innerHTML = 'แจ้งย้อนหลังได้ไม่เกิน <b>' + (S('LEAVE_BACK_DAYS') || 30) + '</b> วัน · ล่วงหน้าไม่เกิน <b>' + (S('LEAVE_AHEAD_DAYS') || 180) + '</b> วัน · ' +
+    'ระบบบันทึกทันทีเมื่อกดบันทึกข้อมูล';
+  $('#lvGo').onclick = lvSubmit;
+  RENDER.myleaves();        // ประวัติการลาอยู่ในหน้านี้แล้ว (หุบไว้)
+};
+function lvRead() {
+  var root = $('#lvF'); function v(n) { var el = $('[name=' + n + ']', root); return el ? el.value : ''; }
+  var type = ($('input[name=type]:checked', root) || {}).value;
+  return { type: type, mode: 'range', dateFrom: v('dateFrom'), dateTo: v('dateTo') || v('dateFrom'),
+           dur: ($('input[name=dur]:checked', root) || {}).value || 'full', startTime: v('startTime'), endTime: v('endTime'),
+           reason: v('reason').trim(), attachUrl: v('attachUrl').trim() };
+}
+function lvPreview() {
+  var root = $('#lvF'); if (!root) return;
+  var f = lvRead();
+  st.leaveDraft = f;
+  $$('[data-show]', root).forEach(function (el) { el.classList.toggle('hide', el.getAttribute('data-show') !== f.dur); });
+  $$('.trange-dur', root).forEach(function (el) { el.classList.add('hide'); });
+  var rw = $('#lvReasonWrap'); if (rw) rw.classList.toggle('hide', !lvNeedNote(f.type));
+  var pv = $('#lvPreview');
+  if (!f.dateFrom || f.dateTo < f.dateFrom) { pv.innerHTML = '<div class="note warn">วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม</div>'; return; }
+  var pick = wcLeaveDates(f.dateFrom, f.dateTo, 120), dates = pick.dates;
+  var warn = [];
+  var pid = st.d.auth.personId;
+  dates.forEach(function (d) {
+    var rs = IX.dayRec[pid + '|' + d] || [];
+    if (rs.length) warn.push(thDate(d) + ' มี ' + rs.map(function (r) { return tlabel(r.type); }).join(', ') + ' อยู่แล้ว');
+  });
+  (st.d.leaveReqs || []).forEach(function (q) {
+    if (q.status !== 'PENDING' && q.status !== 'CERTIFIED') return;
+    var qDates = q.dateList ? String(q.dateList).split(',') : null;
+    var hit = qDates ? dates.some(function (d) { return qDates.indexOf(d) !== -1; })
+                     : dates.some(function (d) { return d >= q.dateFrom && d <= q.dateTo; });
+    if (hit) warn.push('ทับกับรายการ ' + q.reqId + ' (' + LV_ST[q.status][0] + ')');
+  });
+  if (f.dateFrom) {
+    var back = daysBetween(f.dateFrom, st.d.today);
+    if (back > (Number(S('LEAVE_BACK_DAYS')) || 30)) warn.push('ย้อนหลังเกินกำหนด — ระบบจะไม่รับ ให้ติดต่อฝ่ายเลขานุการโครงการ');
+  }
+  // แสดงเฉพาะคำเตือน (วันที่ไม่ถูกต้องหรือทับกับรายการอื่น) — ไม่แสดงการคำนวณชั่วโมง
+  pv.innerHTML = (!dates.length ? '<div class="note warn">ช่วงวันที่เลือกไม่มีวันทำการ</div>' : '') +
+    (pick.offOnly ? '<div class="note">วันที่เลือกอยู่นอกรอบวันทำการของโครงการ (' + esc(wcDaysLabel(wcDaysOf(dates[0]))) + ') — บันทึกได้ แต่ไม่หักชั่วโมงจากเวลาโครงการ</div>' : '') +
+    (warn.length ? '<div class="note warn" style="margin-top:8px">⚠ ' + warn.map(esc).join('<br>⚠ ') + '</div>' : '');
+}
+function lvSubmit() {
+  var f = lvRead(), b = $('#lvGo');
+  if (!f.dateFrom) return toast('กรุณาระบุช่วงวันที่', true);
+  if (lvNeedNote(f.type) && !f.reason) return toast('กรุณาระบุหมายเหตุ', true);
+  if (!lvNeedNote(f.type)) f.reason = '';
+  b.disabled = true; b.textContent = 'กำลังบันทึก…';
+  call('apiSubmitLeave', st.token, f).then(function (res) {
+    var q = res.req || res;
+    st.d.leaveReqs.push(q);
+    (res.records || []).forEach(function (r) { st.d.records.push(r); });
+    st.leaveDraft = null;
+    buildIndex(); updateBadges();
+    toast('บันทึกข้อมูลเรียบร้อยแล้ว (' + q.reqId + ')');
+    RENDER.leave();
+    var fold = $('#leaveHistoryFold'); if (fold) fold.open = true;
+  }).catch(handleErr).then(function () { b.disabled = false; b.textContent = 'บันทึกข้อมูล'; });
+}
+
+// ================================================================== ใบลา (การ์ดใช้ร่วมกัน)
+function lvWhen(q) {
+  return (q.dateFrom === q.dateTo ? thDate(q.dateFrom) + ' (' + TH_WD[wd(q.dateFrom)] + ')' : thDate(q.dateFrom) + ' – ' + thDate(q.dateTo)) +
+    ' · ' + (q.dur === 'full' ? 'เต็มวัน' : q.startTime + '–' + q.endTime + ' น.') + ' · ' + q.days + ' วันทำการ';
+}
+function lvLead(q) {
+  var lead = daysBetween(String(q.submittedAt).slice(0, 10), q.dateFrom);
+  if (lead < 0) return '<span class="st bad">ยื่นย้อนหลัง ' + (-lead) + ' วัน</span>';
+  if (lead === 0) return '<span class="st warn">ยื่นวันเดียวกับวันลา</span>';
+  return '<span class="st ' + (lead <= 2 ? 'warn' : 'good') + '">ล่วงหน้า ' + lead + ' วัน</span>';
+}
+function editorOf(name) { return (st.d.editors || []).filter(function (e) { return e.name === name; })[0]; }
+function lvSigned(q) {
+  if (q.status !== 'CERTIFIED' && q.status !== 'REVOKED') return '';
+  if (q.decidedBy === 'ระบบอัตโนมัติ') return q.mailedTo ? '<div class="muted small">✉ แจ้งหัวหน้าแล้ว: ' + esc(q.mailedTo) + '</div>' : '';
+  var ed = editorOf(q.decidedBy);
+  return '<div class="signed">✓ รับรองโดย <b>' + esc(q.decidedBy) + '</b>' + (ed && ed.position ? ' · ' + esc(ed.position) : '') + ' · ' + thDate(String(q.decidedAt).slice(0, 10)) + ' ' + esc(String(q.decidedAt).slice(11, 16)) +
+    (ed && ed.signature ? '<img src="' + ed.signature + '" alt="ลายมือชื่อ ' + esc(ed.name) + '">' : '') + '</div>' +
+    (q.mailedTo ? '<div class="muted small">✉ แจ้งหัวหน้าแล้ว: ' + esc(q.mailedTo) + '</div>' : '');
+}
+RENDER.myleaves = function () {
+  var box = $('#myLeaveList'); if (!box) return;
+  var list = (st.d.leaveReqs || []).slice().sort(function (a, b) { return a.submittedAt < b.submittedAt ? 1 : -1; });
+  box.innerHTML = list.length ? list.map(function (q) {
+    var s = LV_ST[q.status] || [q.status, 'na'];
+    return '<div class="rv2 view lv-card"><div>' +
+      '<div class="lv-top">' + tag(q.type) + ' ' + pill(s[0], s[1]) + ' <span class="muted small">ใบ ' + esc(q.reqId) + '</span></div>' +
+      '<div class="lv-when">' + esc(lvWhen(q)) + ' · <b>' + hrs(Number(q.totalMin), false) + ' ชม.</b></div>' +
+      (q.reason || q.attachUrl ? '<div class="why">' + (q.reason ? '📝 ' + esc(q.reason) : '') + (q.attachUrl ? (q.reason ? ' · ' : '') + '<a href="' + esc(q.attachUrl) + '" target="_blank" rel="noopener">เอกสารแนบ</a>' : '') + '</div>' : '') +
+      (q.decisionNote ? '<div class="small" style="margin-top:6px"><b>หมายเหตุฝ่ายเลขานุการโครงการ:</b> ' + esc(q.decisionNote) + '</div>' : '') +
+      lvSigned(q) +
+      '<div class="lv-foot"><span class="muted small">บันทึกเมื่อ ' + thDate(String(q.submittedAt).slice(0, 10)) + ' ' + esc(String(q.submittedAt).slice(11, 16)) + '</span>' +
+      (q.status === 'PENDING' || q.status === 'CERTIFIED' ? '<button class="btn sm danger" data-lv-cancel="' + q.reqId + '">ยกเลิกรายการ</button>' : '') + '</div>' +
+      '</div></div>';
+  }).join('') : '<div class="empty">ยังไม่มีประวัติการลา</div>';
+};
+if ($('#myLeaveList')) $('#myLeaveList').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-lv-cancel]'); if (!b) return;
+  if (b.getAttribute('data-sure') !== '1') { b.setAttribute('data-sure', '1'); b.textContent = 'เลือกอีกครั้งเพื่อยืนยันการยกเลิก'; return; }
+  b.disabled = true;
+  call('apiCancelLeave', st.token, b.getAttribute('data-lv-cancel')).then(function (res) {
+    var q = res.req || res;
+    var i = st.d.leaveReqs.findIndex(function (x) { return x.reqId === q.reqId; });
+    if (i >= 0) st.d.leaveReqs[i] = q;
+    if (res.deletedIds && res.deletedIds.length) {
+      st.d.records = st.d.records.filter(function (x) { return res.deletedIds.indexOf(x.recordId) === -1; });
+    }
+    buildIndex(); updateBadges(); toast('ยกเลิกรายการเรียบร้อยแล้ว'); RENDER.myleaves();
+  }).catch(function (er) { handleErr(er); b.disabled = false; });
+});
+
+// ================================================================== ผู้ปฏิบัติงานโครงการ: การลงเวลาของฉัน
+RENDER.mytime = function () {
+  var p = IX.people[st.d.auth.personId]; if (!p) return;
+  var ms = {}; ms[ym(st.d.today)] = 1;
+  (st.d.attendance || []).forEach(function (r) { ms[ym(r.date)] = 1; });
+  if (S('CLOCK_START')) ms[ym(S('CLOCK_START'))] = 1;
+  var months = Object.keys(ms).sort().reverse();
+  if (!st.mtMonth || months.indexOf(st.mtMonth) === -1) st.mtMonth = months[0];
+  $('#mtMonth').innerHTML = months.map(function (m) { return '<option value="' + m + '"' + (m === st.mtMonth ? ' selected' : '') + '>' + thMonth(m, true) + '</option>'; }).join('');
+  var y = +st.mtMonth.slice(0, 4), m = +st.mtMonth.slice(5, 7), from = st.mtMonth + '-01', to = monthEnd(y, m);
+  var o = attStats(p, from, to);
+  $('#mtTitle').textContent = 'การลงเวลา · ' + thMonth(st.mtMonth, true);
+  $('#mtKpis').innerHTML = [['มาปฏิบัติงาน', o.present, 'วัน', 'จาก ' + o.work + ' วันทำงาน'], ['เวลาเข้างานเฉลี่ย', o.inAvg || '–', 'น.', 'เวลากลับเฉลี่ย ' + (o.outAvg || '–') + ' น.'],
+    ['ไม่ได้ลงเวลากลับ', o.noOut, 'วัน', 'ลืมสแกนตอนกลับ'], ['ไม่พบการลงเวลา', o.absent, 'วัน', 'ไม่มีการสแกนและไม่มีใบลา']].map(function (k, i) {
+    return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + ['var(--primary)', '#1baf7a', '#b45309', 'var(--critical)'][i] + '"></span>' + k[0] + '</div><div class="val num">' + k[1] + '<small>' + k[2] + '</small></div><div class="foot">' + k[3] + '</div></div>';
+  }).join('');
+  var rows = [];
+  for (var d = from; d <= to && d <= st.d.today; d = addDays(d, 1)) {
+    if (!isWorkday(d) && !IX.att[p.personId + '|' + d]) continue;
+    var x = dayStatus(p, d), r = x.row, lb = dsLabel(x.code);
+    rows.unshift('<tr><td style="white-space:nowrap">' + thDate(d) + ' <span class="muted small">' + TH_WD[wd(d)] + '</span></td>' +
+      '<td>' + pill(lb[0], lb[1]) + '</td><td class="num">' + (r ? hmOf(r.inAt) : '–') + '</td><td class="num">' + (r && r.outAt ? hmOf(r.outAt) : (x.noOut ? '<span class="t-warn">ไม่ได้สแกน</span>' : '–')) + '</td>' +
+      '<td class="small">' + x.recs.map(function (q) { return tag(q.type) + ' ' + (q.fullDay === 'Y' ? '' : q.startTime + '–' + q.endTime); }).join(' ') + (r && r.note ? ' <span class="muted">' + esc(r.note) + '</span>' : '') + '</td></tr>');
+  }
+  $('#mtTable').innerHTML = rows.length ? '<table class="tbl"><thead><tr><th>วันที่</th><th>สถานะ</th><th class="r">เวลาเข้างาน</th><th class="r">เวลากลับ</th><th>หมายเหตุ / ใบลา</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
+    : '<div class="empty">ยังไม่มีข้อมูลในเดือนนี้</div>';
+  // เฉพาะการลงชื่อของเจ้าของหน้า — เซิร์ฟเวอร์ส่งของทุกคนในวงที่มองเห็นมาด้วย
+  var mePid = (st.d.auth && st.d.auth.personId) || '';
+  var ev = (st.d.eventAtt || []).filter(function (r) { return !mePid || r.personId === mePid; })
+    .slice().sort(function (a, b) { return a.inAt < b.inAt ? 1 : -1; });
+  var mm = {}; st.d.meetings.forEach(function (x) { mm[x.meetingId] = x; });
+  $('#mtEvents').innerHTML = ev.length ? '<table class="tbl"><thead><tr><th>วันที่</th><th>หัวข้อ</th><th>เวลามา</th><th>เวลากลับ</th></tr></thead><tbody>' + ev.map(function (r) {
+    var mt = mm[r.meetingId] || {};
+    return '<tr><td>' + thDate(String(r.inAt).slice(0, 10)) + '</td><td class="req-reason">' + esc(mt.topic || r.meetingId) + '</td><td class="num">' + hmOf(r.inAt) + (seeLate() && Number(r.lateMin) ? ' <span class="t-warn small">มาหลังเวลาที่กำหนด ' + r.lateMin + '</span>' : '') + '</td><td class="num">' + (hmOf(r.outAt) || '–') + '</td></tr>';
+  }).join('') + '</tbody></table>' : '<div class="empty">ยังไม่มีการลงชื่อเข้าร่วมประชุม</div>';
+};
+$('#mtMonth').addEventListener('change', function (e) { st.mtMonth = e.target.value; RENDER.mytime(); });
+
+// ================================================================== ประชุมภายในโครงการ (ผู้ปฏิบัติงานโครงการ)
+var MEET_ST_L = { PENDING: ['รอรับรอง', 'warn'], CERTIFIED: ['✓ บันทึกแล้ว', 'good'],
+                  REJECTED: ['✗ ไม่รับรอง', 'bad'], CANCELLED: ['ยกเลิกแล้ว', 'na'] };
+var MM = { filter: 'all', editId: '' };
+
+/** ประชุมภายในทั้งหมดที่หน้าเว็บมองเห็น (เซิร์ฟเวอร์กรองมาแล้วตามสิทธิ์) */
+function intMeetings() {
+  return (st.d.meetings || []).filter(function (m) { return String(m.scope || '') === 'INTERNAL'; });
+}
+/** รายชื่อผู้เข้าร่วมของวงหนึ่ง จาก eventAtt ที่โหลดมาแล้ว */
+function meetPeopleOf(id) {
+  return (st.d.eventAtt || []).filter(function (r) { return r.meetingId === id; }).map(function (r) { return r.personId; });
+}
+function meetMins(m) { var n = Number(m.minutes); return isFinite(n) && n > 0 ? n : 0; }
+function myPersonId() { return (st.d.auth && st.d.auth.personId) || ''; }
+
+/** ฟอร์มบันทึกการประชุมบนหน้า #page-mymeet — กรอกได้ทันทีไม่ต้องเปิดหน้าต่าง */
+function renderMeetInlineForm(m) {
+  var box = $('#mmFormBox'); if (!box) return;
+  var me = myPersonId(), meP = IX.people[me] || {};
+  var people = m ? meetPeopleOf(m.meetingId) : [me];
+  box.innerHTML = '<h2>' + (m ? 'แก้ไขข้อมูลการประชุม (' + esc(m.meetingId) + ')' : 'รายละเอียดการประชุม') + '</h2>' +
+    '<div class="form-grid" id="mmInlineF" style="margin-top:14px">' +
+      '<div class="field full"><label>หัวข้อการประชุม *</label><input class="inp" type="text" name="topic" maxlength="300" value="' + esc(m ? m.topic : '') + '" placeholder="ระบุหัวข้อการประชุม"></div>' +
+      '<div class="field"><label>วันที่ประชุม</label><input class="inp" type="date" name="date" value="' + esc(m ? m.date : st.d.today) + '"></div>' +
+      '<div class="field"><label>ผู้รับผิดชอบ</label><input class="inp" type="text" name="owner" maxlength="200" value="' + esc(m ? m.owner : (meP.fullName || '')) + '"></div>' +
+      timeRange({ label: 'เวลาประชุม', a: 'name="startTime"', av: m ? m.startTime : '13:00', b: 'name="endTime"', bv: m ? m.endTime : '15:00' }) +
+      '<div class="field full"><label>รายละเอียด / หมายเหตุ <span class="muted">(ไม่บังคับ)</span></label><textarea class="inp" name="note" rows="2" maxlength="1000">' + esc(m ? m.note : '') + '</textarea></div>' +
+      meetPickerHtml(people) +
+    '</div>' +
+    '<div class="actions-row">' +
+      (m ? '<button class="btn" id="mmCancelEdit" type="button">ยกเลิกการแก้ไข</button>' : '') +
+      '<button class="btn primary block-sm" id="mmInlineSave" type="button">' + (m ? 'บันทึกการแก้ไข' : 'บันทึกข้อมูล') + '</button>' +
+    '</div>';
+  meetPickCount();
+  $('#mpSearch').addEventListener('input', function (e) {
+    var q = e.target.value.trim().toLowerCase();
+    $$('#mpList .ppick').forEach(function (el) {
+      el.classList.toggle('hide', !!q && el.getAttribute('data-k').indexOf(q) === -1);
+    });
+  });
+  $('#mpList').addEventListener('change', meetPickCount);
+  if (m && $('#mmCancelEdit')) $('#mmCancelEdit').onclick = function () { MM.editId = ''; renderMeetInlineForm(null); };
+  $('#mmInlineSave').onclick = function () {
+    var root = $('#mmInlineF'), btn = this;
+    var o = { meetingId: m ? m.meetingId : '', date: $('[name=date]', root).value,
+      startTime: $('[name=startTime]', root).value, endTime: $('[name=endTime]', root).value,
+      topic: $('[name=topic]', root).value.trim(), owner: $('[name=owner]', root).value.trim(),
+      note: $('[name=note]', root).value.trim(), people: meetPicked() };
+    btn.disabled = true; btn.textContent = 'กำลังบันทึก…';
+    call('apiMeetSave', st.token, o).then(function () {
+      MM.editId = '';
+      toast('บันทึกข้อมูลการประชุมเรียบร้อยแล้ว');
+      return load(true);
+    }).then(function () {
+      var fold = $('#meetHistoryFold'); if (fold) fold.open = true;
+    }).catch(function (e) { btn.disabled = false; btn.textContent = m ? 'บันทึกการแก้ไข' : 'บันทึกข้อมูล'; handleErr(e); });
+  };
+}
+
+RENDER.mymeet = function () {
+  var editing = MM.editId ? intMeetings().filter(function (x) { return x.meetingId === MM.editId; })[0] : null;
+  renderMeetInlineForm(editing || null);
+  var me = myPersonId();
+  var all = intMeetings().map(function (m) { return { m: m, people: meetPeopleOf(m.meetingId) }; })
+    .filter(function (x) { return x.m.ownerId === me || x.people.indexOf(me) !== -1; })
+    .sort(function (a, b) { return (a.m.date + a.m.startTime) < (b.m.date + b.m.startTime) ? 1 : -1; });
+  var cert = all.filter(function (x) { return x.m.status === 'CERTIFIED'; });
+  var minCert = cert.reduce(function (t, x) { return t + meetMins(x.m); }, 0);
+  $('#mmKpis').innerHTML = [
+    ['การประชุมที่บันทึกแล้ว', cert.length, 'ครั้ง', 'นับเป็นเวลาปฏิบัติงาน', 'var(--success)'],
+    ['เวลาประชุมรวม', hrs(minCert, false), 'ชม.', 'รวมทุกวงที่เข้าร่วม', 'var(--primary)']
+  ].map(function (k) {
+    return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + k[4] + '"></span>' + k[0] + '</div>' +
+      '<div class="val num">' + k[1] + '<small>' + k[2] + '</small></div><div class="foot">' + esc(k[3]) + '</div></div>';
+  }).join('');
+
+  var list = all.filter(function (x) {
+    if (MM.filter === 'all') return true;
+    if (MM.filter === 'mine') return x.m.ownerId === me;
+    return x.m.status === MM.filter;
+  });
+  $('#mmList').innerHTML = list.length ? '<table class="tbl"><thead><tr><th>วันที่</th><th>เวลา</th><th>หัวข้อ</th><th>ผู้รับผิดชอบ</th><th class="r">ผู้เข้าร่วม</th><th>เอกสารสรุป</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
+    list.map(function (x) {
+      var m = x.m, mine = m.ownerId === me, lb = MEET_ST_L[m.status] || MEET_ST_L.CERTIFIED;
+      var act = '';
+      if (mine && m.status !== 'CANCELLED') act = '<button class="btn sm" data-mm-edit="' + m.meetingId + '">แก้ไข</button> <button class="btn sm danger" data-mm-cancel="' + m.meetingId + '">ยกเลิก</button>';
+      else if (!mine && m.status !== 'CANCELLED') act = '<button class="btn sm" data-mm-decline="' + m.meetingId + '">ไม่ได้เข้าร่วม</button>';
+      return '<tr><td style="white-space:nowrap">' + thDate(m.date) + ' <span class="muted small">' + TH_WD[wd(m.date)] + '</span></td>' +
+        '<td class="small">' + esc(m.startTime + '–' + m.endTime) + '<div class="muted small">' + hrs(meetMins(m), false) + ' ชม.</div></td>' +
+        '<td class="req-reason"><b>' + esc(m.topic) + '</b>' + (m.note ? '<div class="muted small">' + esc(m.note) + '</div>' : '') +
+          (m.decisionNote ? '<div class="small t-warn">หมายเหตุ: ' + esc(m.decisionNote) + '</div>' : '') + '</td>' +
+        '<td class="small">' + esc(m.owner) + (mine ? ' <span class="muted">(ท่าน)</span>' : '') + '</td>' +
+        '<td class="r"><button class="btn sm" data-mm-who="' + m.meetingId + '">' + x.people.length + ' คน</button></td>' +
+        '<td>' + docsCell(m, m.status !== 'CANCELLED') + '</td>' +
+        '<td>' + pill(lb[0], lb[1]) + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
+    }).join('') + '</tbody></table>'
+    : '<div class="empty">ยังไม่มีประวัติการประชุม</div>';
+};
+if ($('#mmFilter')) $('#mmFilter').addEventListener('change', function (e) { MM.filter = e.target.value; RENDER.mymeet(); });
+
+/** ตัวเลือกผู้เข้าร่วม — ค้นหาได้ เลือกได้หลายคน */
+function meetPickerHtml(selected) {
+  var sel = {}; (selected || []).forEach(function (id) { sel[id] = 1; });
+  var ppl = IX.roster || [];
+  return '<div class="field full"><label>ผู้เข้าร่วม <span class="muted" id="mpCount"></span></label>' +
+    '<input class="inp" id="mpSearch" placeholder="พิมพ์ชื่อ หน่วยงาน หรือ SAP เพื่อค้นหา">' +
+    '<div class="ppick-list" id="mpList">' + ppl.map(function (p) {
+      return '<label class="ppick" data-k="' + esc((p.fullName + ' ' + p.ward + ' ' + p.division + ' ' + p.sap).toLowerCase()) + '">' +
+        '<input type="checkbox" value="' + p.personId + '"' + (sel[p.personId] ? ' checked' : '') + '>' +
+        '<span><b>' + esc(p.fullName) + '</b><em>' + esc(p.ward || p.division || '') + '</em></span></label>';
+    }).join('') + '</div></div>';
+}
+function meetPicked() {
+  return Array.prototype.map.call(document.querySelectorAll('#mpList input:checked'), function (i) { return i.value; });
+}
+function meetPickCount() {
+  var el = $('#mpCount'); if (el) el.textContent = '(เลือกแล้ว ' + meetPicked().length + ' คน)';
+}
+function openMeetModal(m) {
+  var me = myPersonId(), meP = IX.people[me] || {};
+  var people = m ? meetPeopleOf(m.meetingId) : [me];
+  openModal('<h3>' + (m ? 'แก้ไขการประชุม' : 'บันทึกการประชุมภายในโครงการ') + '</h3>' +
+    '<p class="muted small">เวลาที่บันทึกแล้วจะนับเป็นเวลาปฏิบัติงานของทุกคนในวง</p>' +
+    '<div class="form-grid" style="margin-top:14px">' +
+      '<div class="field full"><label>หัวข้อการประชุม</label><input class="inp" name="topic" maxlength="300" value="' + esc(m ? m.topic : '') + '" placeholder="เช่น ประชุมติดตามความคืบหน้า Phoenix ครั้งที่ 3"></div>' +
+      '<div class="field"><label>วันที่ประชุม</label><input class="inp" type="date" name="date" value="' + esc(m ? m.date : st.d.today) + '"></div>' +
+      '<div class="field"><label>ผู้รับผิดชอบ</label><input class="inp" name="owner" maxlength="200" value="' + esc(m ? m.owner : (meP.fullName || '')) + '"></div>' +
+      timeRange({ label: 'เวลาประชุม', a: 'name="startTime"', av: m ? m.startTime : '13:00', b: 'name="endTime"', bv: m ? m.endTime : '15:00' }) +
+      '<div class="field full"><label>รายละเอียด / มติที่ประชุม <span class="muted">(ไม่บังคับ)</span></label><textarea class="inp" name="note" rows="3" maxlength="1000">' + esc(m ? m.note : '') + '</textarea></div>' +
+      meetPickerHtml(people) +
+    '</div><div class="actions"><button class="btn" data-close>ยกเลิก</button><button class="btn primary" id="mmSave">' + (m ? 'บันทึกการแก้ไข' : 'บันทึกข้อมูล') + '</button></div>');
+  meetPickCount();
+  $('#mpSearch').addEventListener('input', function (e) {
+    var q = e.target.value.trim().toLowerCase();
+    $$('#mpList .ppick').forEach(function (el) {
+      el.classList.toggle('hide', !!q && el.getAttribute('data-k').indexOf(q) === -1);
+    });
+  });
+  $('#mpList').addEventListener('change', meetPickCount);
+  $('#mmSave').onclick = function () {
+    var md = $('#modal'), btn = this;
+    var o = { meetingId: m ? m.meetingId : '', date: $('[name=date]', md).value,
+      startTime: $('[name=startTime]', md).value, endTime: $('[name=endTime]', md).value,
+      topic: $('[name=topic]', md).value.trim(), owner: $('[name=owner]', md).value.trim(),
+      note: $('[name=note]', md).value.trim(), people: meetPicked() };
+    btn.disabled = true;
+    call('apiMeetSave', st.token, o).then(function () {
+      closeModal(); toast(m ? 'บันทึกการแก้ไขแล้ว' : 'บันทึกข้อมูลการประชุมเรียบร้อยแล้ว');
+      return load(true);
+    }).catch(function (e) { btn.disabled = false; handleErr(e); });
+  };
+}
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-mm-edit],[data-mm-cancel],[data-mm-decline],[data-mm-who]');
+  if (!b) return;
+  var id = b.getAttribute('data-mm-edit') || b.getAttribute('data-mm-cancel') || b.getAttribute('data-mm-decline') || b.getAttribute('data-mm-who');
+  var m = intMeetings().filter(function (x) { return x.meetingId === id; })[0];
+  if (!m) return;
+  if (b.hasAttribute('data-mm-edit')) {
+    if (st.page === 'mymeet') {
+      MM.editId = m.meetingId;
+      renderMeetInlineForm(m);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    return openMeetModal(m);
+  }
+  if (b.hasAttribute('data-mm-who')) return openMeetWho(m);
+  if (b.hasAttribute('data-mm-cancel')) {
+    if (!confirm('ยกเลิกการประชุม "' + m.topic + '" ?')) return;
+    return call('apiMeetCancel', st.token, id).then(function () { toast('ยกเลิกรายการเรียบร้อยแล้ว'); return load(true); }).catch(handleErr);
+  }
+  var why = prompt('ไม่ได้เข้าร่วมการประชุมนี้ใช่ไหม · ระบุเหตุผลสั้น ๆ (ไม่บังคับ)');
+  if (why === null) return;
+  call('apiMeetDecline', st.token, id, why).then(function () { toast('นำรายชื่อของท่านออกจากการประชุมนี้แล้ว'); return load(true); }).catch(handleErr);
+});
+// ------------------------------------------------------------------ เอกสารสรุปการประชุม (ลิงก์ Google Workspace)
+var DOC_MAX = 10;
+var DOC_KIND = { document: ['Docs', '#2563eb'], spreadsheets: ['Sheets', '#16a34a'], presentation: ['Slides', '#d97706'],
+  forms: ['Forms', '#7c3aed'], drawings: ['Drawings', '#dc2626'], folder: ['โฟลเดอร์', '#475569'], file: ['Drive', '#0f766e'] };
+var DOC_ACC = { LINK: ['เปิดได้ทุกคนที่มีลิงก์', 'good'], DOMAIN: ['เปิดได้เฉพาะคนในองค์กร', 'good'],
+  PRIVATE: ['⚠ จำกัดสิทธิ์ — เฉพาะคนที่ได้รับแชร์', 'warn'], UNKNOWN: ['⚠ ตรวจสิทธิ์ไม่ได้', 'warn'] };
+function meetDocs(m) {
+  if (!m || !m.docs) return [];
+  try { var a = JSON.parse(m.docs); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+function docNeedsCheck(d) { return d.access === 'PRIVATE' || d.access === 'UNKNOWN'; }
+/** ตรวจฝั่งหน้าเว็บก่อนส่ง (เซิร์ฟเวอร์ตรวจซ้ำอีกชั้น) */
+function docUrlOk(u) { return /^https:\/\/(docs|drive)\.google\.com\/\S*(\/d\/|folders\/|[?&]id=)[\w-]{15,}/i.test(String(u || '').trim()); }
+function docKindOf(u) {
+  var k = /google\.com\/(document|spreadsheets|presentation|forms|drawings)\//i.exec(u);
+  if (k) return k[1].toLowerCase();
+  return /folders\//i.test(u) ? 'folder' : 'file';
+}
+function docChip(kind) {
+  var k = DOC_KIND[kind] || DOC_KIND.file;
+  return '<span class="doc-kind" style="background:' + k[1] + '">' + esc(k[0]) + '</span>';
+}
+/** ผู้ใช้คนนี้แนบ/แก้ลิงก์ของวงนี้ได้ไหม (เซิร์ฟเวอร์ตรวจอีกชั้น) */
+function canEditDocs(m) {
+  if (!m || m.status === 'CANCELLED') return false;
+  if (isStaff()) return true;
+  var me = myPersonId();
+  return !!me && (m.ownerId === me || meetPeopleOf(m.meetingId).indexOf(me) !== -1);
+}
+/** ช่องในตาราง: จำนวนลิงก์ + เตือนถ้ามีไฟล์ที่ต้องตรวจสิทธิ์ */
+function docsCell(m, allowEdit) {
+  var ds = meetDocs(m), warn = ds.filter(docNeedsCheck).length;
+  if (!ds.length && m.docsCount) return '<span class="muted small">' + m.docsCount + ' ไฟล์</span>';
+  if (!ds.length) {
+    return allowEdit && canEditDocs(m) ? '<button class="btn sm" data-docs="' + m.meetingId + '">+ แนบลิงก์</button>' : '<span class="muted small">ยังไม่มี</span>';
+  }
+  return '<button class="btn sm doc-btn' + (warn ? ' warn' : '') + '" data-docs="' + m.meetingId + '">📎 ' + ds.length + ' ไฟล์' +
+    (warn ? ' · ⚠ ' + warn : '') + '</button>';
+}
+function docListHtml(ds) {
+  if (!ds.length) return '<div class="empty" style="padding:18px">ยังไม่มีเอกสารสรุป</div>';
+  return '<div class="doc-list">' + ds.map(function (d) {
+    var a = DOC_ACC[d.access] || DOC_ACC.UNKNOWN;
+    return '<div class="doc-item">' + docChip(d.kind) +
+      '<div class="doc-main"><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + esc(d.title || d.url) + '</a>' +
+      '<div class="muted small">' + pill(a[0], a[1]) + ' · แนบโดย ' + esc(d.addedBy || '-') + (d.addedAt ? ' · ' + thDate(String(d.addedAt).slice(0, 10)) : '') + '</div></div></div>';
+  }).join('') + '</div>';
+}
+function docRowHtml(d) {
+  d = d || {};
+  return '<div class="doc-edit"><div class="doc-edit-f">' +
+    '<input class="inp" data-f="url" placeholder="https://docs.google.com/document/d/…" value="' + esc(d.url || '') + '">' +
+    '<input class="inp" data-f="title" maxlength="150" placeholder="ชื่อเอกสาร (เว้นว่าง = ใช้ชื่อไฟล์จาก Drive)" value="' + esc(d.title || '') + '">' +
+    '</div><button class="btn sm danger" data-doc-del title="นำออก">✕</button></div>';
+}
+/** เปิดดู/แก้ไขลิงก์เอกสารของวงหนึ่ง · after = ทำต่อหลังบันทึก (ใช้ในหน้าบริหาร) */
+function openMeetDocs(m, after) {
+  var ds = meetDocs(m), edit = canEditDocs(m);
+  var head = '<h3>เอกสารสรุปการประชุม</h3><p class="muted small">' + esc(m.topic) + ' · ' + thDate(m.date) + ' · ' + esc(m.startTime + '–' + m.endTime) + ' น.</p>';
+  if (!edit) {
+    openModal(head + '<div style="margin-top:12px">' + docListHtml(ds) + '</div><div class="actions"><button class="btn primary" data-close>ปิด</button></div>');
+    return;
+  }
+  var warn = ds.filter(docNeedsCheck);
+  openModal(head +
+    (ds.length ? '<div style="margin-top:12px">' + docListHtml(ds) + '</div>' : '') +
+    (warn.length ? '<div class="note warn small" style="margin-top:10px">มี ' + warn.length + ' ไฟล์ที่ผู้เข้าร่วมอาจเปิดไม่ได้ · เปิดไฟล์ใน Google Drive › แชร์ › ตั้งค่าเป็น "ทุกคนในองค์กรที่มีลิงก์" หรือ "ทุกคนที่มีลิงก์" แล้วกลับมาเลือกบันทึกอีกครั้งเพื่อตรวจใหม่</div>' : '') +
+    '<h4 style="margin:18px 0 6px">แก้ไขรายการลิงก์</h4>' +
+    '<p class="muted small" style="margin:0 0 8px">รับเฉพาะลิงก์ Google Docs · Sheets · Slides · Forms · Drive ไม่เกิน ' + DOC_MAX + ' ลิงก์ · ระบบจะตรวจการแชร์ให้หลังบันทึก</p>' +
+    '<div id="docRows">' + (ds.length ? ds.map(docRowHtml).join('') : docRowHtml()) + '</div>' +
+    '<button class="btn sm" id="docAdd" style="margin-top:6px">+ เพิ่มลิงก์</button>' +
+    '<h4 style="margin:18px 0 6px">หรืออัปโหลดไฟล์เอกสาร</h4>' +
+    '<p class="muted small" style="margin:0 0 8px">ไม่ต้องแชร์สิทธิ์ก็เปิดได้ เพราะไฟล์ถูกเก็บไว้ในระบบเอง</p>' +
+    attachBoxHtml('meetAttach') +
+    '<div class="actions"><button class="btn" data-close>ยกเลิก</button><button class="btn primary" id="docSave">บันทึกเอกสาร</button></div>');
+  wireAttachBox('meetAttach', 'MEET', m.meetingId);
+  var rows = $('#docRows');
+  function syncAdd() { $('#docAdd').disabled = rows.children.length >= DOC_MAX; }
+  syncAdd();
+  $('#docAdd').onclick = function () { rows.insertAdjacentHTML('beforeend', docRowHtml()); syncAdd(); rows.lastElementChild.querySelector('input').focus(); };
+  rows.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-doc-del]'); if (!b) return;
+    b.closest('.doc-edit').remove(); if (!rows.children.length) rows.insertAdjacentHTML('beforeend', docRowHtml()); syncAdd();
+  });
+  rows.addEventListener('input', function (e) {
+    if (e.target.getAttribute('data-f') !== 'url') return;
+    var v = e.target.value.trim();
+    e.target.classList.toggle('bad', !!v && !docUrlOk(v));
+  });
+  $('#docSave').onclick = function () {
+    var btn = this, bad = 0;
+    var list = Array.prototype.map.call(rows.querySelectorAll('.doc-edit'), function (r) {
+      var u = r.querySelector('[data-f=url]').value.trim(), t = r.querySelector('[data-f=title]').value.trim();
+      if (u && !docUrlOk(u)) { bad++; r.querySelector('[data-f=url]').classList.add('bad'); }
+      return { url: u, title: t };
+    }).filter(function (x) { return x.url; });
+    if (bad) return toast('มี ' + bad + ' ลิงก์ที่ไม่ใช่ลิงก์ Google Docs / Sheets / Slides / Drive', true);
+    btn.disabled = true;
+    call('apiMeetDocs', st.token, m.meetingId, list).then(function (res) {
+      var w = meetDocs(res).filter(docNeedsCheck).length;
+      closeModal();
+      toast(w ? 'บันทึกแล้ว · ⚠ ' + w + ' ไฟล์ตรวจสิทธิ์ไม่ผ่าน ผู้เข้าร่วมอาจเปิดไม่ได้' : 'บันทึกเอกสารสรุปแล้ว', !!w);
+      return load(true);
+    }).then(function () { if (after) after(); }).catch(function (e) { btn.disabled = false; handleErr(e); });
+  };
+}
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-docs]'); if (!b) return;
+  var id = b.getAttribute('data-docs');
+  var m = intMeetings().filter(function (x) { return x.meetingId === id; })[0];
+  if (m) openMeetDocs(m);
+});
+
+function openMeetWho(m) {
+  var ids = meetPeopleOf(m.meetingId);
+  openModal('<h3>ผู้เข้าร่วม · ' + esc(m.topic) + '</h3><p class="muted small">' + thDate(m.date) + ' · ' + esc(m.startTime + '–' + m.endTime) + ' น. · ' + ids.length + ' คน</p>' +
+    '<div class="ppick-list" style="margin-top:12px">' + (ids.length ? ids.map(function (id) {
+      var p = IX.people[id] || {};
+      return '<div class="ppick"><span><b>' + esc(p.fullName || id) + '</b><em>' + esc(p.ward || p.division || '') + '</em></span></div>';
+    }).join('') : '<div class="empty">ไม่มีผู้เข้าร่วม</div>') + '</div>' +
+    '<div class="actions"><button class="btn primary" data-close>ปิด</button></div>');
+}
+
+// ================================================================== บัญชีของฉัน
+RENDER.account = function () {
+  var me = st.d.me || {}, a = st.d.auth || {}, p = IX.people && IX.people[me.personId];
+  $('#accTitle').textContent = me.fullName || a.name || '';
+  $('#accLead').innerHTML = esc([ROLE_TH[me.role] || me.role, 'ชื่อผู้ใช้ ' + (me.username || ''), p ? 'ผูกกับ ' + p.fullName + (p.sap ? ' (SAP ' + p.sap + ')' : '') : ''].filter(Boolean).join(' · '));
+  $('#accForm').innerHTML = '<div class="form-grid"><div class="field"><label>อีเมล</label><input class="inp" type="email" id="accEmail" value="' + esc(me.email || '') + '"></div>' +
+    '<div class="field"><label>โทรศัพท์</label><input class="inp" id="accPhone" value="' + esc(me.phone || '') + '"></div></div>' +
+    '<div class="actions-row"><button class="btn primary" id="accSave">บันทึก</button></div>';
+  $('#accSave').onclick = function () {
+    var b = this; b.disabled = true;
+    call('apiUpdateMyProfile', st.token, { email: $('#accEmail').value, phone: $('#accPhone').value }).then(function (acc) {
+      st.d.me = acc; toast('บันทึกข้อมูลติดต่อเรียบร้อยแล้ว');
+    }).catch(handleErr).then(function () { b.disabled = false; });
+  };
+};
+$('#pwGo').addEventListener('click', function () {
+  var pwErr = pwBad($('#pwNew').value); if (pwErr) return toast(pwErr, true);
+  if ($('#pwNew').value !== $('#pwNew2').value) return toast('การยืนยันรหัสผ่านไม่ตรงกัน', true);
+  var b = this; b.disabled = true;
+  call('apiChangePassword', st.token, $('#pwOld').value, $('#pwNew').value).then(function () {
+    $('#pwOld').value = $('#pwNew').value = $('#pwNew2').value = ''; toast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
+  }).catch(handleErr).then(function () { b.disabled = false; });
+});
+
+// ================================================================== จุดลงเวลา (สแกนรหัส QR)
+var SC = { mode: store('px_st_mode') || 'DAY', meetingId: store('px_st_meet') || '', state: null, timer: null, stream: null,
+  loop: null, detector: null, lastText: '', lastAt: 0, busy: false, recent: [] };
+RENDER.station = function () {
+  $$('#stMode button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === SC.mode); });
+  $('#stEventBox').classList.toggle('hide', SC.mode !== 'EVENT');
+  stApplyTab();
+  if (st.d.station && !SC.state) SC.state = st.d.station;
+  renderStation();
+  stRefresh().then(function () { if (RM.tab === 'room') roomResume(); });
+  if (RM.tab === 'room') roomResume();
+  clearInterval(SC.timer); SC.timer = setInterval(stRefresh, 30000);
+  clearInterval(RM.tick); RM.tick = setInterval(roomTick, 1000);
+  setTimeout(function () { if (st.page === 'station' && RM.tab === 'scan' && !isTouch()) $('#scanInput').focus(); }, 80);
+};
+function isTouch() { return window.matchMedia && window.matchMedia('(pointer:coarse)').matches; }
+function stRefresh() {
+  // ขณะแสดง QR หน้าห้อง จอ QR ดึงสถานะมาให้อยู่แล้วทุก ~15 วินาที
+  if (RM.tab === 'room' && RM.cur && st.page === 'station') return Promise.resolve();
+  return call('apiStationState', st.token, SC.mode === 'EVENT' ? SC.meetingId : '').then(function (s) {
+    SC.state = s; renderStation();
+    if (RM.tab === 'room' && !RM.cur) renderRoomBox();
+  }).catch(function (e) { if (e.code === 'AUTH') handleErr(e); });
+}
+function stApplyTab() {
+  $$('#stTabs button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-st') === RM.tab); });
+  $('#roomBox').classList.toggle('hide', RM.tab !== 'room');
+  $('#scanBox').classList.toggle('hide', RM.tab !== 'scan');
+  if (RM.tab !== 'scan') camStop();
+}
+$('#stTabs').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-st]'); if (!b) return;
+  RM.tab = b.getAttribute('data-st'); store('px_st_tab', RM.tab);
+  stApplyTab();
+  if (RM.tab === 'room') roomResume(); else { roomFull(false); scanShow({ idle: true }); if (!isTouch()) $('#scanInput').focus(); stRefresh(); }
+});
+
+// ================================================================== QR หน้าห้อง (ฝ่ายเลขานุการโครงการ / จุดลงเวลา)
+var RM = { tab: store('px_st_tab') || 'room', dir: '', cur: null, t0: 0, lastFetch: 0, fetching: false, shown: '', full: false, tick: null, busy: false };
+function roomTarget() { return SC.mode === 'EVENT' ? { target: 'EVENT', meetingId: SC.meetingId || '' } : { target: 'DAY', meetingId: '' }; }
+function roomMatches(w) { var t = roomTarget(); return w && w.target === t.target && (t.target === 'DAY' || w.meetingId === t.meetingId); }
+function roomDefaultDir() { return new Date().getHours() < 12 ? 'IN' : 'OUT'; }
+function roomDirTh(d) { return d === 'OUT' ? 'ออก' : 'เข้า'; }
+
+/** หลังรีเฟรชหน้า/สลับโหมด: แสดงรอบที่ยังเปิดอยู่ของเป้าหมายนี้ต่อ */
+function roomResume() {
+  if (RM.cur && roomMatches(RM.cur.window) && RM.cur.window.open) return renderRoomBox();
+  RM.cur = null; RM.shown = '';
+  var list = (SC.state && SC.state.rooms) || [], want = store('px_room');
+  var open = list.filter(function (w) { return w.open && roomMatches(w); });
+  var pick = open.filter(function (w) { return w.winId === want; })[0] || open[0];
+  if (pick) return roomFetch(pick.winId);
+  renderRoomBox();
+}
+
+function renderRoomBox() {
+  var box = $('#roomBox');
+  if (RM.cur && RM.cur.window && RM.cur.window.open) {
+    var w = RM.cur.window;
+    if (box.getAttribute('data-win') !== w.winId) {
+      box.setAttribute('data-win', w.winId); RM.shown = '';
+      var C = 2 * Math.PI * 15.5;
+      box.innerHTML = '<div class="room-live ' + (w.mode === 'OUT' ? 'out' : 'in') + '">' +
+        '<div class="room-head"><span class="room-badge">สแกนเพื่อลงเวลา' + roomDirTh(w.mode) + '</span>' +
+          '<span class="room-title">' + esc(w.title) + (w.meetingTime ? ' · ' + esc(w.meetingTime) + ' น.' : '') + '</span></div>' +
+        '<div class="room-qr" id="rmQr"><div class="spin"></div></div>' +
+        '<div class="room-meta"><div class="room-ring"><svg viewBox="0 0 36 36" class="ring"><circle cx="18" cy="18" r="15.5" class="ring-bg"></circle>' +
+          '<circle cx="18" cy="18" r="15.5" class="ring-fg" id="rmRing" style="stroke-dasharray:' + C + '"></circle></svg><span id="rmLeft">–</span></div>' +
+          '<div class="room-close">ปิดรับใน <b class="num" id="rmClose">–</b> <span id="rmCloseAt"></span></div></div>' +
+        '<div class="room-pinbox"><span>สแกนไม่ได้? ให้กรอกรหัส</span><b class="room-pin num" id="rmPin">––– –––</b><span class="small" id="rmPinLeft"></span></div>' +
+        '<div class="room-actions">' +
+          '<button class="btn sm on-dark" data-rm="ext5">+5 นาที</button><button class="btn sm on-dark" data-rm="ext15">+15 นาที</button>' +
+          '<button class="btn sm on-dark" data-rm="rotate" title="QR และรหัสเดิมใช้ไม่ได้ทันที">สร้าง QR ใหม่</button>' +
+          '<button class="btn sm on-dark" data-rm="full" id="rmFullBtn">⛶ จอใหญ่</button>' +
+          '<button class="btn sm on-dark rm-stop" data-rm="close">ปิดรับ</button></div>' +
+        '<p class="room-hint">ผู้ปฏิบัติงานโครงการเปิด<b>แอปพลิเคชันกล้อง</b>ของโทรศัพท์มือถือ สแกนรหัส QR แล้วเลือกลิงก์ · QR เปลี่ยนทุก ' + RM.cur.step + ' วินาที ถ่ายรูปส่งต่อไม่ทัน</p></div>';
+    }
+    if (RM.shown !== RM.cur.url) { drawQr($('#rmQr'), RM.cur.url); RM.shown = RM.cur.url; }
+    $('#rmPin').textContent = RM.cur.pin.slice(0, 3) + ' ' + RM.cur.pin.slice(3);
+    $('#rmCloseAt').textContent = '(ถึง ' + w.closesHm + ' น.)';
+    $('#rmFullBtn').textContent = RM.full ? '✕ ออกจากจอใหญ่' : '⛶ จอใหญ่';
+    roomTick();
+    return;
+  }
+  box.removeAttribute('data-win');
+  if (!RM.dir) RM.dir = roomDefaultDir();
+  var t = roomTarget(), list = ((SC.state && SC.state.rooms) || []).filter(roomMatches);
+  var defMin = Number(S(RM.dir === 'OUT' ? 'ROOM_OUT_MIN' : 'ROOM_IN_MIN')) || 60;
+  var needMeeting = t.target === 'EVENT' && !t.meetingId;
+  box.innerHTML = '<div class="room-setup">' +
+    '<h2>เปิดจอ QR ให้ผู้ปฏิบัติงานโครงการสแกน</h2>' +
+    '<p class="small" style="color:#cbd5e1;margin:2px 0 14px">' + (t.target === 'EVENT' ? 'ลงชื่อเข้าร่วมประชุม/อบรมที่เลือกด้านบน' : 'ลงเวลาปฏิบัติงานประจำวัน') + ' · เลือกโหมดแล้วเลือก "เปิดรับ"</p>' +
+    '<div class="room-dir" id="rmDir">' +
+      '<button data-dir="IN" class="' + (RM.dir === 'IN' ? 'on' : '') + '"><b>สแกนเข้า</b><span>มาถึง / เริ่มประชุม</span></button>' +
+      '<button data-dir="OUT" class="' + (RM.dir === 'OUT' ? 'on' : '') + '"><b>สแกนออก</b><span>กลับ / เลิกประชุม</span></button></div>' +
+    '<div class="room-min"><label for="rmMin">เปิดรับ</label><input class="inp" type="number" id="rmMin" min="1" max="600" value="' + defMin + '"><span>นาที แล้วปิดเอง</span></div>' +
+    '<button class="btn primary block room-open" id="rmOpen"' + (needMeeting ? ' disabled' : '') + '>เปิดรับการลงเวลา' + roomDirTh(RM.dir) + ' · แสดง QR</button>' +
+    (needMeeting ? '<p class="small" style="color:#fde68a">เลือกประชุม/อบรมด้านบนก่อน (หรือเลือก + รอบใหม่)</p>' : '') +
+    (list.length ? '<div class="room-hist"><div class="small" style="color:#94a3b8;margin-bottom:6px">รอบของวันนี้</div>' + list.map(function (w) {
+      return '<div class="rh-row"><span class="room-dot ' + (w.mode === 'OUT' ? 'out' : 'in') + '"></span><span>' + roomDirTh(w.mode) + ' · เปิด ' + hmOf(w.openedAt) + '–' + w.closesHm + ' น.</span>' +
+        (w.open ? '<button class="btn sm on-dark" data-rm-show="' + w.winId + '">แสดง QR</button>' : '<span class="small" style="color:#94a3b8">' + (w.reason === 'CLOSED' ? 'ปิดแล้ว' : 'หมดเวลา') + '</span>') + '</div>';
+    }).join('') + '</div>' : '') +
+    '</div>';
+}
+
+function roomTick() {
+  if (st.page !== 'station' || RM.tab !== 'room' || !RM.cur || !RM.cur.window || !RM.cur.window.open) return;
+  var el = Date.now() - RM.t0, c = RM.cur;
+  var qrLeft = Math.max(0, Math.ceil(c.nextInSec - el / 1000)), pinLeft = Math.max(0, Math.ceil(c.pinNextInSec - el / 1000));
+  var winLeft = Math.max(0, Math.ceil(c.window.secondsLeft - el / 1000));
+  var ring = $('#rmRing'), C = 2 * Math.PI * 15.5;
+  if (ring) ring.style.strokeDashoffset = C * (1 - qrLeft / c.step);
+  if ($('#rmLeft')) $('#rmLeft').textContent = 'QR ใหม่ใน ' + qrLeft + ' วิ';
+  if ($('#rmPinLeft')) $('#rmPinLeft').textContent = 'เปลี่ยนใน ' + pinLeft + ' วิ';
+  if ($('#rmClose')) {
+    var h = Math.floor(winLeft / 3600), m = Math.floor(winLeft % 3600 / 60), s = winLeft % 60;
+    $('#rmClose').textContent = (h ? h + ':' + pad(m) : m) + ':' + pad(s);
+    $('#rmClose').classList.toggle('t-warn', winLeft <= 120);
+  }
+  if (!RM.fetching && (qrLeft === 0 || pinLeft === 0 || winLeft === 0 || Date.now() - RM.lastFetch > 15000)) roomFetch(c.window.winId);
+}
+
+function roomFetch(winId) {
+  if (RM.fetching) return;
+  RM.fetching = true; RM.lastFetch = Date.now();
+  call('apiRoomQr', st.token, winId).then(roomApply).catch(function (e) {
+    if (e.code === 'AUTH') return handleErr(e);
+    if (e.code === 'NO_WINDOW') { RM.cur = null; renderRoomBox(); }
+    // เน็ตหลุดชั่วคราว: คง QR เดิมไว้ ลองใหม่รอบหน้า
+  }).then(function () { RM.fetching = false; });
+}
+
+function roomApply(r) {
+  if (r.state) { SC.state = r.state; renderStation(); }
+  if (r.closed || !r.window || !r.window.open) {
+    if (RM.cur && r.window && RM.cur.window.winId === r.window.winId) toast(r.message || 'ปิดรับสแกนแล้ว');
+    RM.cur = null; roomFull(false); renderRoomBox(); return;
+  }
+  RM.cur = r; RM.t0 = Date.now(); RM.lastFetch = Date.now();
+  store('px_room', r.window.winId);
+  renderRoomBox();
+}
+
+function roomFull(on) {
+  RM.full = !!on;
+  var p = $('#scanPanel'); if (!p) return;
+  p.classList.toggle('room-full', RM.full);
+  document.body.classList.toggle('no-scroll', RM.full);
+  try {
+    if (RM.full && p.requestFullscreen && !document.fullscreenElement) p.requestFullscreen().catch(function () {});
+    if (!RM.full && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function () {});
+  } catch (e) { /* iframe ไม่อนุญาต — ใช้โหมดเต็มหน้าต่างแทน */ }
+  var b = $('#rmFullBtn'); if (b) b.textContent = RM.full ? '✕ ออกจากจอใหญ่' : '⛶ จอใหญ่';
+}
+document.addEventListener('fullscreenchange', function () { if (!document.fullscreenElement && RM.full) roomFull(false); });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && RM.full) roomFull(false); });
+
+$('#roomBox').addEventListener('click', function (e) {
+  var d = e.target.closest('[data-dir]');
+  if (d) { RM.dir = d.getAttribute('data-dir'); renderRoomBox(); return; }
+  var sh = e.target.closest('[data-rm-show]');
+  if (sh) { roomFetch(sh.getAttribute('data-rm-show')); return; }
+  if (e.target.closest('#rmOpen')) {
+    var b = $('#rmOpen'), t = roomTarget(), mins = Number($('#rmMin').value);
+    b.disabled = true; b.textContent = 'กำลังเปิด…';
+    call('apiRoomOpen', st.token, { target: t.target, meetingId: t.meetingId, mode: RM.dir, minutes: mins }).then(function (r) {
+      toast('เปิดรับการลงเวลา' + roomDirTh(RM.dir) + ' ' + r.window.minutes + ' นาที');
+      roomApply(r); RM.lastFetch = 0;      // ดึงสถานะรายชื่อทันที
+    }).catch(function (err) { handleErr(err); renderRoomBox(); });
+    return;
+  }
+  var a = e.target.closest('[data-rm]'); if (!a || !RM.cur || RM.busy) return;
+  var act = a.getAttribute('data-rm'), id = RM.cur.window.winId;
+  if (act === 'full') return roomFull(!RM.full);
+  if (act === 'close' && a.getAttribute('data-sure') !== '1') {
+    a.setAttribute('data-sure', '1'); a.textContent = 'เลือกอีกครั้งเพื่อยืนยันการปิดรับ';
+    setTimeout(function () { if (a.isConnected) { a.removeAttribute('data-sure'); a.textContent = 'ปิดรับ'; } }, 4000);
+    return;
+  }
+  RM.busy = true;
+  var p = act === 'ext5' ? call('apiRoomExtend', st.token, id, 5) : act === 'ext15' ? call('apiRoomExtend', st.token, id, 15)
+    : act === 'rotate' ? call('apiRoomRotate', st.token, id) : call('apiRoomClose', st.token, id);
+  p.then(function (r) {
+    if (act === 'close') { toast('ปิดรับการสแกนเรียบร้อยแล้ว'); RM.cur = null; roomFull(false); renderRoomBox(); stRefresh(); return; }
+    toast(act === 'rotate' ? 'สร้าง QR ใหม่แล้ว — QR และรหัสเดิมใช้ไม่ได้' : 'ต่อเวลาแล้ว · ปิดรับ ' + r.window.closesHm + ' น.');
+    roomApply(r);
+  }).catch(handleErr).then(function () { RM.busy = false; });
+});
+function stAllPeople() { return (SC.state && SC.state.people) || []; }
+/** คนที่ "ควรลงเวลา" วันนี้ = ผู้ปฏิบัติงานโครงการที่ยังปฏิบัติงาน */
+function stPeople() { return stAllPeople().filter(function (p) { return p.status !== 'LEFT' && (!p.role || p.role === 'KEY_USER'); }); }
+function renderStation() {
+  var s = SC.state; if (!s) { $('#stList').innerHTML = '<div class="empty"><div class="spin"></div></div>'; return; }
+  // ตัวเลือกประชุม
+  var ms = s.meetings || [];
+  if (SC.mode === 'EVENT' && (!SC.meetingId || !ms.some(function (m) { return m.meetingId === SC.meetingId; }))) {
+    var t = ms.filter(function (m) { return m.date === s.today; })[0] || ms[0]; SC.meetingId = t ? t.meetingId : '';
+  }
+  $('#stEvent').innerHTML = ms.length ? ms.map(function (m) {
+    return '<option value="' + m.meetingId + '"' + (m.meetingId === SC.meetingId ? ' selected' : '') + '>' + esc((m.date === s.today ? 'วันนี้ ' : thDate(m.date) + ' ') + (m.startTime ? m.startTime + ' ' : '') + '· ' + String(m.topic).slice(0, 60)) + '</option>';
+  }).join('') : '<option value="">— ยังไม่มีประชุมในทะเบียน —</option>';
+  var byP = {}; stAllPeople().forEach(function (p) { byP[p.personId] = p; });
+  var leaveFull = {}; (s.leave || []).forEach(function (r) { if (r.fullDay === 'Y') leaveFull[r.personId] = r; });
+  var total = stPeople().length;
+  if (SC.mode === 'DAY') {
+    var att = s.attendance || [], inN = att.length, late = att.filter(function (r) { return Number(r.lateMin) > 0; }).length;
+    var outN = att.filter(function (r) { return r.outAt; }).length, lv = Object.keys(leaveFull).filter(function (k) { return byP[k]; }).length;
+    $('#stKpis').innerHTML = stKpi('มาปฏิบัติงานแล้ว', inN, '/ ' + total, 'var(--primary)') + (seeLate() ? stKpi('มาหลังเวลาที่กำหนด', late, 'คน', '#eda100') : '') + stKpi('ลงเวลากลับ', outN, 'คน', 'var(--success)');
+    $('#stListTitle').textContent = 'สแกนวันนี้ · ' + thDate(s.today);
+    $('#stListSub').textContent = 'ลาเต็มวัน ' + lv + ' คน · อัปเดต ' + s.now + ' น.';
+    var rows = att.slice().sort(function (a, b) { return (b.outAt || b.inAt) < (a.outAt || a.inAt) ? -1 : 1; });
+    $('#stList').innerHTML = rows.length ? rows.map(function (r) {
+      var p = byP[r.personId] || (IX.people && IX.people[r.personId]) || { fullName: r.personId };
+      return '<div class="sl-row' + (SC.flashId === r.attId ? ' flash-row' : '') + '"><span class="avatar sm">' + esc(initials(p.fullName)) + '</span><div class="sl-main"><b>' + esc(p.fullName) + '</b><span class="muted small">' + esc(p.ward || '') + '</span></div>' +
+        '<div class="sl-t"><span>เข้า <b class="num">' + hmOf(r.inAt) + '</b></span>' + (seeLate() && Number(r.lateMin) ? '<span class="t-warn small">มาหลังเวลาที่กำหนด ' + r.lateMin + '</span>' : '') + '</div>' +
+        '<div class="sl-t"><span>ออก <b class="num">' + (hmOf(r.outAt) || '–') + '</b></span>' + methodBadge(r.inMethod) + geoBadge(r.inGeo, r.inLat, r.inLng) +
+        (r.outAt ? geoBadge(r.outGeo, r.outLat, r.outLng) : '') +
+        (r.deviceNote ? '<span class="t-warn small" title="' + esc(r.deviceNote) + '">⚠ ใช้อุปกรณ์ซ้ำกับผู้อื่น</span>' : '') + '</div></div>';
+    }).join('') : '<div class="empty">ยังไม่มีการสแกนวันนี้</div>';
+    var scanned = {}; att.forEach(function (r) { scanned[r.personId] = 1; });
+    var miss = stPeople().filter(function (p) { return !scanned[p.personId] && !leaveFull[p.personId]; });
+    $('#stMissing').innerHTML = miss.length ? miss.map(function (p) { return '<button class="chip-l" data-miss="' + p.personId + '">' + esc(p.fullName) + '</button>'; }).join('') : '<span class="muted">ครบทุกคนแล้ว 🎉</span>';
+  } else {
+    var ea = s.eventAtt || [], m = ms.filter(function (x) { return x.meetingId === SC.meetingId; })[0] || {};
+    $('#stKpis').innerHTML = stKpi('ลงชื่อเข้าร่วมแล้ว', ea.length, '/ ' + total, 'var(--primary)') + (seeLate() ? stKpi('มาหลังเวลาที่กำหนด', ea.filter(function (r) { return Number(r.lateMin) > 0; }).length, 'คน', '#eda100') : '') +
+      stKpi('ลงชื่อออก', ea.filter(function (r) { return r.outAt; }).length, 'คน', 'var(--success)');
+    $('#stListTitle').textContent = m.topic ? String(m.topic).slice(0, 70) : 'เลือกประชุม';
+    $('#stListSub').textContent = (m.date ? thDate(m.date) : '') + (m.startTime ? ' · เริ่ม ' + m.startTime + ' น.' : ' · (ยังไม่ได้ระบุเวลาเริ่ม — ไม่คิดการมาหลังเวลา)');
+    $('#stList').innerHTML = ea.length ? ea.slice().sort(function (a, b) { return a.inAt < b.inAt ? 1 : -1; }).map(function (r) {
+      var p = byP[r.personId] || (IX.people && IX.people[r.personId]) || { fullName: r.personId };
+      return '<div class="sl-row"><span class="avatar sm">' + esc(initials(p.fullName)) + '</span><div class="sl-main"><b>' + esc(p.fullName) + '</b><span class="muted small">' + esc(p.ward || '') + '</span></div>' +
+        '<div class="sl-t"><span>เข้า <b class="num">' + hmOf(r.inAt) + '</b></span>' + (seeLate() && Number(r.lateMin) ? '<span class="t-warn small">มาหลังเวลาที่กำหนด ' + r.lateMin + '</span>' : '') + '</div><div class="sl-t"><span>ออก <b class="num">' + (hmOf(r.outAt) || '–') + '</b></span></div></div>';
+    }).join('') : '<div class="empty">ยังไม่มีผู้ลงชื่อเข้าร่วม</div>';
+    var done = {}; ea.forEach(function (r) { done[r.personId] = 1; });
+    var miss2 = stPeople().filter(function (p) { return !done[p.personId]; });
+    $('#stMissing').innerHTML = miss2.length ? miss2.map(function (p) { return '<button class="chip-l" data-miss="' + p.personId + '">' + esc(p.fullName) + '</button>'; }).join('') : '<span class="muted">ครบทุกคนแล้ว 🎉</span>';
+  }
+}
+function stKpi(l, v, u, c) { return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + c + '"></span>' + l + '</div><div class="val num">' + v + '<small>' + u + '</small></div></div>'; }
+
+$('#stMode').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-mode]'); if (!b) return;
+  SC.mode = b.getAttribute('data-mode'); store('px_st_mode', SC.mode);
+  $$('#stMode button').forEach(function (x) { x.classList.toggle('on', x === b); });
+  $('#stEventBox').classList.toggle('hide', SC.mode !== 'EVENT');
+  scanShow({ idle: true }); stRetarget();
+});
+$('#stEvent').addEventListener('change', function (e) { SC.meetingId = e.target.value; store('px_st_meet', SC.meetingId); stRetarget(); });
+/** เปลี่ยนโหมด/ประชุม: QR ที่แสดงอยู่ต้องตรงกับเป้าหมายใหม่ */
+function stRetarget() {
+  if (RM.cur && !roomMatches(RM.cur.window)) { RM.cur = null; roomFull(false); }
+  if (RM.tab === 'room') renderRoomBox();
+  stRefresh().then(function () { if (RM.tab === 'room') roomResume(); });
+}
+$('#scanInput').addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault(); var v = this.value; this.value = ''; handleCode(v);
+});
+$('#camStart').addEventListener('click', camStart);
+$('#camStop').addEventListener('click', function () { camStop(); $('#scanInput').focus(); });
+$('#stMissing').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-miss]'); if (!b || !isStaff()) return;
+  if (SC.mode === 'EVENT') return manualEvent(b.getAttribute('data-miss'));
+  openClockModal(b.getAttribute('data-miss'), SC.state.today);
+});
+$('#stManual').addEventListener('click', function () { openClockModal('', SC.state ? SC.state.today : st.d.today); });
+$('#stEventAdd').addEventListener('click', function () {
+  openMeetingModal({ date: st.d.today, startTime: '', endTime: '' }, function (m) { SC.meetingId = m.meetingId; store('px_st_meet', m.meetingId); stRetarget(); });
+});
+
+function handleCode(text) {
+  text = String(text || '').trim();
+  if (!text) return;
+  var now = Date.now();
+  if (text === SC.lastText && now - SC.lastAt < 5000) return;      // กล้องอ่าน QR ใบเดิมซ้ำ ๆ
+  if (SC.busy) return;
+  SC.lastText = text; SC.lastAt = now; SC.busy = true;
+  if (SC.mode === 'EVENT' && !SC.meetingId) { SC.busy = false; return scanShow({ error: 'เลือกประชุม/อบรมก่อนสแกน' }); }
+  scanShow({ pending: true });
+  call('apiScan', st.token, text, { mode: SC.mode, meetingId: SC.meetingId }).then(function (r) {
+    var s = SC.state;
+    if (s && r.att) { var i = s.attendance.findIndex(function (x) { return x.attId === r.att.attId; }); if (i >= 0) s.attendance[i] = r.att; else s.attendance.push(r.att); SC.flashId = r.att.attId; }
+    if (s && r.ea) { s.eventAtt = s.eventAtt || []; var j = s.eventAtt.findIndex(function (x) { return x.eaId === r.ea.eaId; }); if (j >= 0) s.eventAtt[j] = r.ea; else s.eventAtt.push(r.ea); }
+    if (r.att && st.d.attendance && isStaff()) { var k = st.d.attendance.findIndex(function (x) { return x.attId === r.att.attId; }); if (k >= 0) st.d.attendance[k] = r.att; else st.d.attendance.push(r.att); buildAttIndex(); }
+    scanShow(r); beep(r.action === 'DUP' ? 'dup' : 'ok'); renderStation();
+  }).catch(function (e) {
+    if (e.code === 'AUTH') return handleErr(e);
+    scanShow({ error: e.message }); beep('err');
+  }).then(function () { SC.busy = false; if (!isTouch() && !SC.stream) $('#scanInput').focus(); });
+}
+function scanShow(r) {
+  var el = $('#scanResult');
+  clearTimeout(SC.hideT);
+  if (r.idle) { el.className = 'scan-result idle'; el.innerHTML = '<div class="sr-name">พร้อมอ่านรหัส</div><div class="sr-msg">' + (SC.mode === 'EVENT' ? 'โหมดลงชื่อเข้าร่วมประชุม/อบรม' : 'โหมดลงเวลาปฏิบัติงาน — สแกนครั้งแรก = เข้า · ครั้งถัดไป = ออก') + '</div>'; return; }
+  if (r.pending) { el.className = 'scan-result pending'; el.innerHTML = '<div class="sr-name"><span class="spin sm"></span> กำลังบันทึก…</div>'; return; }
+  if (r.error) { el.className = 'scan-result err'; el.innerHTML = '<div class="sr-tag">✗ ไม่สำเร็จ</div><div class="sr-msg">' + esc(r.error) + '</div>'; }
+  else {
+    var cls = r.action === 'IN' ? (r.lateMin ? 'late' : 'in') : r.action === 'OUT' ? 'out' : 'dup';
+    var tagTxt = { IN: SC.mode === 'EVENT' ? 'ลงชื่อเข้าร่วม' : 'มาปฏิบัติงาน', OUT: SC.mode === 'EVENT' ? 'ลงชื่อออก' : 'กลับ', DUP: 'สแกนซ้ำ' }[r.action];
+    el.className = 'scan-result ' + cls;
+    el.innerHTML = '<div class="sr-tag">' + tagTxt + ' · <b class="num">' + esc(r.time) + '</b></div><div class="sr-name">' + esc(r.person.fullName) + '</div>' +
+      '<div class="sr-sub">' + esc([r.person.ward, r.person.sap ? 'SAP ' + r.person.sap : ''].filter(Boolean).join(' · ')) + '</div>' +
+      '<div class="sr-msg">' + esc(r.message) + '</div>' + (r.warn ? '<div class="sr-warn">⚠ ' + esc(r.warn) + '</div>' : '');
+  }
+  SC.hideT = setTimeout(function () { scanShow({ idle: true }); }, r.error ? 9000 : 6000);
+}
+var AC = null;
+function beep(kind) {
+  try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    var o = AC.createOscillator(), g = AC.createGain();
+    o.frequency.value = kind === 'ok' ? 880 : kind === 'dup' ? 660 : 220; o.type = 'sine';
+    g.gain.setValueAtTime(0.18, AC.currentTime); g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + (kind === 'err' ? 0.5 : 0.18));
+    o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime + 0.5);
+    // สั่นได้เฉพาะหลังผู้ใช้แตะหน้าจอแล้ว (หน้าที่เปิดจากการสแกนยังไม่มีการแตะ)
+    if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate(kind === 'err' ? [80, 60, 80] : 60);
+  } catch (e) { /* ไม่มีเสียง */ }
+}
+
+// ---- กล้อง: BarcodeDetector (Chrome/Android) หรือ jsQR (โหลดเมื่อจำเป็น)
+function loadJsQr() {
+  if (window.jsQR) return Promise.resolve();
+  return new Promise(function (res, rej) {
+    var sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+    sc.onload = function () { res(); }; sc.onerror = function () { rej(new Error('โหลดตัวอ่าน QR ไม่ได้')); };
+    document.head.appendChild(sc);
+  });
+}
+function camStart() {
+  var idle = $('#camIdle');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return camFail('เบราว์เซอร์นี้เปิดกล้องในหน้าเว็บไม่ได้');
+  idle.innerHTML = '<div class="spin"></div><p class="small">กำลังเปิดกล้อง…</p>';
+  var getDetector = ('BarcodeDetector' in window) ? window.BarcodeDetector.getSupportedFormats().then(function (f) {
+    return f.indexOf('qr_code') !== -1 ? new window.BarcodeDetector({ formats: ['qr_code'] }) : null;
+  }).catch(function () { return null; }) : Promise.resolve(null);
+  getDetector.then(function (det) {
+    SC.detector = det;
+    return (det ? Promise.resolve() : loadJsQr()).then(function () {
+      return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    });
+  }).then(function (stream) {
+    SC.stream = stream;
+    var v = $('#camVideo'); v.srcObject = stream; v.play();
+    $('#cam').classList.add('live'); idle.classList.add('hide');
+    camLoop();
+  }).catch(function (e) {
+    camFail(e && e.name === 'NotAllowedError' ? 'ไม่ได้รับอนุญาตให้ใช้กล้อง' : (e && e.message) || 'เปิดกล้องไม่ได้');
+  });
+}
+function camFail(msg) {
+  var idle = $('#camIdle'); idle.classList.remove('hide');
+  idle.innerHTML = '<p><b>' + esc(msg) + '</b></p><p class="small">ทางเลือก: ใช้<b>แอปพลิเคชันกล้อง</b>ของเครื่องนี้สแกนรหัส QR (ระบบจะเปิดหน้านี้และบันทึกให้) · หรือเสียบเครื่องสแกนแล้วคลิกช่องด้านล่าง</p>' +
+    '<button class="btn primary" id="camRetry">ลองอีกครั้ง</button>';
+  $('#camRetry').onclick = camStart;
+}
+function camLoop() {
+  var v = $('#camVideo'), cv = SC.canvas || (SC.canvas = document.createElement('canvas')), g = cv.getContext('2d', { willReadFrequently: true });
+  clearInterval(SC.loop);
+  SC.loop = setInterval(function () {
+    if (!SC.stream || v.readyState < 2 || SC.busy) return;
+    if (SC.detector) {
+      SC.detector.detect(v).then(function (codes) { if (codes && codes[0]) handleCode(codes[0].rawValue); }).catch(function () {});
+      return;
+    }
+    if (!window.jsQR) return;
+    var w = Math.min(720, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth);
+    if (!w || !h) return;
+    cv.width = w; cv.height = h; g.drawImage(v, 0, 0, w, h);
+    var img = g.getImageData(0, 0, w, h), code = window.jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
+    if (code && code.data) handleCode(code.data);
+  }, 220);
+}
+function camStop() {
+  clearInterval(SC.loop); SC.loop = null;
+  if (SC.stream) { SC.stream.getTracks().forEach(function (t) { t.stop(); }); SC.stream = null; }
+  var c = $('#cam'); if (c) c.classList.remove('live');
+  var idle = $('#camIdle');
+  if (idle) { idle.classList.remove('hide'); idle.innerHTML = '<button class="btn primary" id="camStart2">เปิดกล้องสแกน</button><p class="small">หรือใช้เครื่องสแกนบาร์โค้ด หรือแอปพลิเคชันกล้องของเครื่องนี้สแกน</p>'; $('#camStart2').onclick = camStart; }
+}
+
+/** เปิดจากแอปกล้อง: ?p=scan&c=... */
+function handleRouteScan() {
+  var code = ROUTE.c;
+  if (st.role === 'STATION' || st.role === 'SECRETARY') {
+    RM.tab = 'scan'; store('px_st_tab', 'scan');
+    go('station');
+    setTimeout(function () { handleCode(code); }, 300);
+  } else {
+    go(homePage());
+    toast('QR นี้ใช้สแกนที่จุดลงเวลาเท่านั้น — ให้ยื่นหน้าจอ QR ให้เจ้าหน้าที่สแกน', true);
+  }
+}
+
+// ================================================================== ผู้ปฏิบัติงานโครงการ: เปิดจากการสแกนรหัส QR หน้าห้อง (?p=ci)
+/** รหัสเครื่อง (สุ่มครั้งเดียว เก็บในเบราว์เซอร์) — ใช้จับ "มือถือเครื่องเดียวลงเวลาให้หลายคน" */
+function deviceId() {
+  var d = store('px_dev');
+  if (!d) {
+    var a = new Uint8Array(12);
+    try { crypto.getRandomValues(a); } catch (e) { for (var i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); }
+    d = Array.prototype.map.call(a, function (x) { return ('0' + x.toString(16)).slice(-2); }).join('');
+    store('px_dev', d);
+  }
+  return d;
+}
+RENDER.ci = function () {
+  if (!$('#ciCard').innerHTML) ciRender({ pending: true });
+};
+function handleRoomRoute() {
+  go('ci');
+  if (ROUTE.err) return ciRender({ error: ROUTE.err, code: ROUTE.code });
+  ciRender({ pending: true, mode: ROUTE.mode, title: ROUTE.title });
+  call('apiRoomCheck', st.token, ROUTE.ticket, deviceId()).then(ciShowResult).catch(function (e) {
+    if (e.code === 'AUTH') return handleErr(e);
+    ciRender({ error: e.message, code: e.code });
+  });
+}
+function ciShowResult(r) {
+  if (r.att && st.d.attendance) {
+    var i = st.d.attendance.findIndex(function (x) { return x.attId === r.att.attId; });
+    if (i >= 0) st.d.attendance[i] = r.att; else st.d.attendance.push(r.att);
+    buildAttIndex();
+  }
+  if (r.ea && st.d.eventAtt) {
+    var j = st.d.eventAtt.findIndex(function (x) { return x.eaId === r.ea.eaId; });
+    if (j >= 0) st.d.eventAtt[j] = r.ea; else st.d.eventAtt.push(r.ea);
+  }
+  if (st.page !== 'ci') go('ci');
+  ciRender(r);
+  beep(r.action === 'DUP' ? 'dup' : 'ok');
+}
+function ciTodayLine() {
+  var a = st.d && st.d.auth && IX.att ? IX.att[st.d.auth.personId + '|' + st.d.today] : null;
+  if (!a) return '';
+  return '<div class="ci-today">วันนี้: เข้า <b class="num">' + hmOf(a.inAt) + '</b> · ออก <b class="num">' + (hmOf(a.outAt) || '–') + '</b></div>';
+}
+function ciRender(r) {
+  var card = $('#ciCard'), canPin = !!(st.d && st.d.auth && st.d.auth.personId);
+  $('#ciPin').classList.add('hide');
+  if (r.pending) {
+    card.innerHTML = '<div class="ci-icon wait"><span class="spin"></span></div><h2>กำลังบันทึกเวลา' + (r.mode === 'OUT' ? 'ออก' : r.mode ? 'เข้า' : '') + '…</h2>' +
+      '<p class="muted">' + esc(r.title || '') + '</p>';
+    return;
+  }
+  if (r.error) {
+    card.innerHTML = '<div class="ci-icon err">✕</div><h2>ลงเวลาไม่สำเร็จ</h2><p class="ci-msg">' + esc(r.error) + '</p>' + ciTodayLine() +
+      '<div class="actions-row" style="justify-content:center"><button class="btn" data-go="' + homePage() + '">ไปหน้าหลัก</button></div>';
+    if (canPin) $('#ciPin').classList.remove('hide');
+    return;
+  }
+  var ev = r.mode === 'EVENT', dup = r.action === 'DUP';
+  var cls = dup ? 'dup' : r.action === 'OUT' ? 'out' : (seeLate() && r.lateMin ? 'late' : 'in');
+  var head = dup ? 'บันทึกไว้แล้ว' : (ev ? 'ลงชื่อ' : 'ลงเวลา') + (r.action === 'OUT' ? 'ออก' : 'เข้า') + 'แล้ว';
+  var t = dup ? hmOf((r.att || r.ea || {})[r.dir === 'OUT' ? 'outAt' : 'inAt']) || r.time : r.time;
+  var sub = r.action === 'IN'
+      ? (seeLate() && r.lateMin ? 'มาหลังเวลาที่กำหนด ' + r.lateMin + ' นาที' + (r.expected ? ' (เวลามาปฏิบัติงาน ' + r.expected + ' น.)' : '')
+                                : 'บันทึกเวลามาปฏิบัติงานแล้ว' + (r.expected ? ' · เวลาเข้างาน ' + r.expected + ' น.' : ''))
+    : r.action === 'OUT' ? (r.workedMin != null ? 'อยู่ ' + hm(r.workedMin) : '') + (seeLate() && r.earlyMin ? ' · กลับก่อนเวลา ' + r.earlyMin + ' นาที' : '') : r.message;
+  card.innerHTML = '<div class="ci-icon ' + cls + '">' + (dup ? 'i' : '✓') + '</div>' +
+    '<h2>' + head + '</h2><div class="ci-time num">' + esc(t) + '<small> น.</small></div>' +
+    '<p class="ci-sub ' + (cls === 'late' ? 't-warn' : '') + '">' + esc(sub) + '</p>' +
+    '<div class="ci-who"><b>' + esc(r.person.fullName) + '</b><span>' + esc((r.window && r.window.title) || r.topic || '') + ' · ' + thDate(r.date) + '</span>' +
+      '<span class="small muted">' + (r.method === 'PIN' ? 'ด้วยรหัส 6 หลัก' : 'ด้วย QR หน้าห้อง') + '</span></div>' +
+    (r.warn ? '<div class="note warn">⚠ ' + esc(r.warn) + '</div>' : '') +
+    (r.deviceWarning ? '<div class="note warn">⚠ ' + esc(r.deviceWarning) + ' — ระบบบันทึกไว้และฝ่ายเลขานุการโครงการจะเห็นในรายงาน</div>' : '') +
+    '<div class="actions-row" style="justify-content:center"><button class="btn primary" data-go="' + homePage() + '">ไปหน้าหลัก</button></div>';
+}
+$('#ciPinGo').addEventListener('click', function () { pinSubmit($('#ciPinInp'), this); });
+$('#ciPinInp').addEventListener('keydown', function (e) { if (e.key === 'Enter') pinSubmit(this, $('#ciPinGo')); });
+
+// ---- ลงเวลาแทน (ฝ่ายเลขานุการโครงการ)
+function openClockModal(personId, date, row) {
+  var ppl = (SC.state && SC.state.people && SC.state.people.length ? SC.state.people : filteredPeople({ team: '', div: '' }))
+    .slice().sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  row = row || (IX.att && IX.att[personId + '|' + date]) || ((SC.state && SC.state.today === date) ? (SC.state.attendance || []).filter(function (r) { return r.personId === personId; })[0] : null);
+  openModal('<h3>ลงเวลาแทน / แก้ไขเวลา</h3><p class="muted small">ใช้กรณีไม่ได้นำโทรศัพท์มือถือมาหรือไม่ได้สแกน · ระบบจะบันทึกชื่อของท่านและเหตุผลไว้ในประวัติ</p><div class="form-grid">' +
+    '<div class="field full"><label>บุคคล</label><select class="inp" id="mcP">' + ppl.map(function (p) { return '<option value="' + p.personId + '"' + (p.personId === personId ? ' selected' : '') + '>' + esc(p.fullName) + ' · ' + esc(p.ward || '') + '</option>'; }).join('') + '</select></div>' +
+    '<div class="field"><label>วันที่</label><input class="inp" type="date" id="mcD" value="' + esc(date) + '"></div><div></div>' +
+    timeRange({ label: 'เวลามาปฏิบัติงาน – ออก', from: 'เข้า', to: 'ออก', note: 'เวลากลับเว้นว่างได้ ถ้ายังไม่ออกงาน', a: 'id="mcIn"', av: row ? hmOf(row.inAt) : workStart(), b: 'id="mcOut"', bv: row ? hmOf(row.outAt) : '' }) +
+    '<div class="field full"><label>เหตุผล *</label><input class="inp" id="mcNote" value="' + esc(row && row.inMethod === 'MANUAL' ? row.note : '') + '" placeholder="เช่น ไม่ได้นำโทรศัพท์มือถือมา / ไม่ได้สแกนออก / ประชุมนอกสถานที่"></div></div>' +
+    '<div class="actions">' + (row ? '<button class="btn danger" id="mcDel" style="margin-right:auto">ลบเวลาวันนี้</button>' : '') + '<button class="btn" data-close>ยกเลิก</button><button class="btn primary" id="mcGo">บันทึก</button></div>');
+  function send(clear) {
+    var o = { personId: $('#mcP').value, date: $('#mcD').value, inTime: clear ? '' : $('#mcIn').value, outTime: clear ? '' : $('#mcOut').value, note: $('#mcNote').value };
+    return call('apiManualClock', st.token, o).then(function (r) {
+      var list = st.d.attendance || (st.d.attendance = []);
+      list = list.filter(function (x) { return !(x.personId === o.personId && x.date === o.date); });
+      if (!r.deleted) list.push(r);
+      st.d.attendance = list;
+      if (SC.state && SC.state.today === o.date) {
+        SC.state.attendance = (SC.state.attendance || []).filter(function (x) { return x.personId !== o.personId; });
+        if (!r.deleted) SC.state.attendance.push(r);
+      }
+      buildAttIndex(); closeModal(); toast(r.deleted ? 'ลบเวลาแล้ว' : 'บันทึกเวลาแล้ว'); rerender();
+    });
+  }
+  $('#mcGo').onclick = function () { var b = this; b.disabled = true; send(false).catch(handleErr).then(function () { b.disabled = false; }); };
+  if (row) $('#mcDel').onclick = function () {
+    var b = this;
+    if (b.getAttribute('data-sure') !== '1') { b.setAttribute('data-sure', '1'); b.textContent = 'เลือกอีกครั้งเพื่อยืนยันการลบ'; return; }
+    if (!$('#mcNote').value.trim()) return toast('กรุณาระบุเหตุผลก่อนลบรายการ', true);
+    b.disabled = true; send(true).catch(handleErr).then(function () { b.disabled = false; });
+  };
+}
+function manualEvent(personId) {
+  var p = stAllPeople().filter(function (x) { return x.personId === personId; })[0] || {};
+  openModal('<h3>ลงชื่อเข้าร่วมแทน</h3><p>' + esc(p.fullName) + '</p><div class="field"><label>หมายเหตุ</label><input class="inp" id="meNote" value="ฝ่ายเลขานุการโครงการลงชื่อเข้าร่วมแทน"></div>' +
+    '<div class="actions"><button class="btn" data-close>ยกเลิก</button><button class="btn primary" id="meGo">ลงชื่อเข้าร่วม</button></div>');
+  $('#meGo').onclick = function () {
+    call('apiManualEvent', st.token, { meetingId: SC.meetingId, personId: personId, present: true, note: $('#meNote').value }).then(function () {
+      closeModal(); toast('ลงชื่อเข้าร่วมเรียบร้อยแล้ว'); stRefresh();
+    }).catch(handleErr);
+  };
+}
+
+// ================================================================== ฝ่ายเลขานุการโครงการ: ลงเวลา
+var CLK_TABS = { daily: ['clkTabDaily', 'clockDaily'], geo: ['clkTabGeo', 'clockGeo'],
+                 log: ['arTabLog', 'arLog'], gps: ['arTabGps', 'arGps'], rep: ['arTabRep', 'arRep'] };   // 3 แท็บหลังอยู่ในไฟล์ AttReport.html
+RENDER.clock = function () {
+  if (!CLK_TABS[st.clkTab]) st.clkTab = 'daily';
+  $$('#clkTabs button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-ct') === st.clkTab); });
+  Object.keys(CLK_TABS).forEach(function (k) {
+    var box = $('#' + CLK_TABS[k][0]); if (box) box.classList.toggle('hide', k !== st.clkTab);
+  });
+  var ar = st.clkTab === 'log' || st.clkTab === 'gps' || st.clkTab === 'rep';
+  $('#arBar').classList.toggle('hide', !ar);
+  RENDER[CLK_TABS[st.clkTab][1]]();
+};
+$('#clkTabs').addEventListener('click', function (e) {
+  var b = e.target.closest('button[data-ct]'); if (!b) return;
+  st.clkTab = b.getAttribute('data-ct'); RENDER.clock();
+});
+/** ระดับความรุนแรงของพิกัด — ใช้เลือก "แย่ที่สุด" ระหว่างตอนเข้า/ออกของวันเดียวกัน */
+var GEO_SEV = { FAR: 3, FUZZY: 2, NONE: 1, OK: 0, OFF: 0 };
+function geoStatusOf_(txt) { var p = String(txt || '').split('|'); return p[0] && GEO_TH[p[0]] ? p[0] : ''; }
+function worstGeoStatus_(row) {
+  var a = geoStatusOf_(row.inGeo), b = geoStatusOf_(row.outGeo);
+  return (GEO_SEV[b] || 0) > (GEO_SEV[a] || 0) ? b : a;
+}
+/** นับความถี่การลงชื่อนอกพื้นที่ที่กำหนด/ตำแหน่งไม่แน่ชัดต่อคนในช่วง r สำหรับให้ฝ่ายเลขานุการโครงการติดตาม */
+var GEO_FLAG_N = 3; // จำนวนครั้งขั้นต่ำของ "อยู่นอกพื้นที่ที่กำหนด" ที่ถือว่าควรติดตาม
+function geoOutliers_(r) {
+  var byP = {};
+  (st.d.attendance || []).forEach(function (x) {
+    if (x.date < r.from || x.date > r.to) return;
+    var s = worstGeoStatus_(x);
+    if (s !== 'FAR' && s !== 'FUZZY') return;
+    var o = byP[x.personId] || (byP[x.personId] = { personId: x.personId, far: 0, fuzzy: 0, last: '', rows: [] });
+    if (s === 'FAR') o.far++; else o.fuzzy++;
+    if (x.date > o.last) o.last = x.date;
+    o.rows.push({ date: x.date, status: s, inGeo: x.inGeo, outGeo: x.outGeo,
+                  inLat: x.inLat, inLng: x.inLng, outLat: x.outLat, outLng: x.outLng });
+  });
+  return Object.keys(byP).map(function (pid) {
+    var o = byP[pid], p = IX.people[pid];
+    o.p = p; o.rows.sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    return o;
+  }).filter(function (o) { return o.p; }).sort(function (a, b) { return (b.far - a.far) || (b.fuzzy - a.fuzzy) || a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+}
+RENDER.clockGeo = function () {
+  renderFilters();
+  var r = periodRange(), list = geoOutliers_(r);
+  var farTotal = list.reduce(function (s, o) { return s + o.far; }, 0);
+  var fuzzyTotal = list.reduce(function (s, o) { return s + o.fuzzy; }, 0);
+  var flagged = list.filter(function (o) { return o.far >= GEO_FLAG_N; }).length;
+  $('#geoKpis').innerHTML = [
+    ['อยู่นอกพื้นที่ที่กำหนด (FAR)', farTotal, 'ครั้ง', 'var(--critical)'],
+    ['ตำแหน่งไม่แน่ชัด', fuzzyTotal, 'ครั้ง', '#eda100'],
+    ['ควรติดตาม (≥ ' + GEO_FLAG_N + ' ครั้ง)', flagged, 'คน', 'var(--critical)']
+  ].map(function (k) {
+    return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + k[3] + '"></span>' + k[0] + '</div><div class="val num">' + k[1] + '</div><div class="foot">' + k[2] + '</div></div>';
+  }).join('');
+  $('#geoTable').innerHTML = list.length ? '<table class="tbl"><thead><tr><th>ชื่อ-สกุล</th><th class="r">อยู่นอกพื้นที่ที่กำหนด</th><th class="r">ตำแหน่งไม่แน่ชัด</th><th>ล่าสุด</th><th>รายการ</th><th></th></tr></thead><tbody>' +
+    list.map(function (o) {
+      return '<tr' + (o.far >= GEO_FLAG_N ? ' class="warn-row"' : '') + '><td><div class="nm click-name" data-person="' + o.p.personId + '">' + esc(o.p.fullName) + '</div><div class="muted small">' + esc(o.p.ward) + '</div></td>' +
+        '<td class="r num">' + (o.far ? '<b class="t-bad">' + o.far + '</b>' : '–') + '</td>' +
+        '<td class="r num">' + (o.fuzzy ? o.fuzzy : '–') + '</td>' +
+        '<td class="small">' + thDate(o.last) + '</td>' +
+        '<td class="small">' + o.rows.slice(0, 6).map(function (x) {
+          var ll = hasLatLng_(x.inLat, x.inLng) ? [x.inLat, x.inLng] : hasLatLng_(x.outLat, x.outLng) ? [x.outLat, x.outLng] : null;
+          var tt = 'เข้า: ' + esc(x.inGeo || '-') + ' · ออก: ' + esc(x.outGeo || '-') + (ll ? ' · แตะเพื่อดูตำแหน่งบนแผนที่' : '');
+          return ll ? '<a class="' + GEO_TH[x.status][1] + '" href="' + geoMapUrl_(ll[0], ll[1]) + '" target="_blank" rel="noopener" title="' + tt + '">' + thDate(x.date).slice(0, 5) + ' 🗺️</a>'
+                    : '<span class="' + GEO_TH[x.status][1] + '" title="' + tt + '">' + thDate(x.date).slice(0, 5) + '</span>';
+        }).join(' ') + (o.rows.length > 6 ? ' …' : '') + '</td>' +
+        '<td><button class="btn sm" data-go="report" data-geo-person="' + o.p.personId + '">ดูรายงาน</button></td></tr>';
+    }).join('') + '</tbody></table>' : '<div class="empty">ไม่มีรายการลงชื่อนอกพื้นที่ที่กำหนดในช่วงที่เลือก</div>';
+};
+$('#geoTable').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-geo-person]'); if (!b) return;
+  st.reportPerson = b.getAttribute('data-geo-person'); st.repDoc = 'summary';
+});
+RENDER.clockDaily = function () {
+  if (!st.clkDate) st.clkDate = st.d.today;
+  $('#clkDate').value = st.clkDate;
+  $('#clkTeam').innerHTML = '<option value="">ทุกทีม</option>' + ['CLINICAL', 'PAS'].map(function (t) { return '<option value="' + t + '"' + (st.clkTeam === t ? ' selected' : '') + '>Team ' + TEAM_L[t] + '</option>'; }).join('');
+  var d = st.clkDate, q = String(st.clkQ || '').toLowerCase();
+  $('#clkTitle').textContent = 'ลงเวลา · ' + TH_WD_FULL[wd(d)] + ' ' + thDate(d) + (IX.hol[d] ? ' (' + IX.hol[d].name + ')' : '');
+  var ppl = filteredPeople({ team: st.clkTeam || '', div: '' }).filter(function (p) { var w = pWindow(p); return w.s <= d && w.e >= d; })
+    .filter(function (p) { return !q || (p.fullName + ' ' + p.ward + ' ' + p.sap).toLowerCase().indexOf(q) !== -1; });
+  var rows = ppl.map(function (p) { return { p: p, x: dayStatus(p, d) }; });
+  var cnt = { IN: 0, LATE: 0, LEAVE: 0, MISS: 0, NOOUT: 0 };
+  rows.forEach(function (o) {
+    if (o.x.code === 'IN' || o.x.code === 'EXTRA') cnt.IN++; if (o.x.code === 'LATE') { cnt.LATE++; cnt.IN++; }
+    if (o.x.code === 'LEAVE') cnt.LEAVE++; if (o.x.code === 'ABSENT' || o.x.code === 'WAIT') cnt.MISS++; if (o.x.noOut) cnt.NOOUT++;
+  });
+  $('#clkKpis').innerHTML = [['มาปฏิบัติงานแล้ว', cnt.IN, 'จาก ' + rows.length + ' คน', 'var(--primary)'], ['มาหลังเวลาที่กำหนด', cnt.LATE, 'คน', '#eda100'], ['ลาเต็มวัน', cnt.LEAVE, 'คน', tcolor('VACATION')],
+    [d < st.d.today ? 'ไม่พบการลงเวลา' : 'ยังไม่ได้ลงเวลา', cnt.MISS, 'คน', 'var(--critical)'], ['ไม่ได้ลงเวลากลับ', cnt.NOOUT, 'คน', '#b45309']].map(function (k) {
+    return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + k[3] + '"></span>' + k[0] + '</div><div class="val num">' + k[1] + '</div><div class="foot">' + k[2] + '</div></div>';
+  }).join('');
+  var ORDER = { ABSENT: 0, WAIT: 1, LATE: 2, IN: 3, EXTRA: 3, LEAVE: 4, OFFWAIT: 4, OFFDUTY: 5, OFF: 5, NA: 6 };
+  rows.sort(function (a, b) { return (ORDER[a.x.code] - ORDER[b.x.code]) || a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+  $('#clkTable').innerHTML = rows.length ? '<table class="tbl"><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เวลามา</th><th>เวลากลับ</th><th class="r">มาหลังเวลาที่กำหนด</th><th class="r">กลับก่อนเวลา</th><th>รายการลา / หมายเหตุ</th><th></th></tr></thead><tbody>' +
+    rows.map(function (o) {
+      var r = o.x.row, lb = DS_LABEL[o.x.code];
+      return '<tr><td><div class="nm click-name" data-person="' + o.p.personId + '">' + esc(o.p.fullName) + '</div><div class="muted small">' + esc(o.p.ward) + '</div></td>' +
+        '<td>' + pill(lb[0], lb[1]) + (o.x.noOut ? ' ' + pill('ไม่ได้ลงเวลากลับ', 'warn') : '') + '</td>' +
+        '<td class="num">' + (r ? hmOf(r.inAt) + (r.inMethod === 'MANUAL' ? ' <span class="muted small" title="' + esc(r.note) + '">✎</span>' : '') : '–') + '</td>' +
+        '<td class="num">' + (r && r.outAt ? hmOf(r.outAt) : '–') + '</td>' +
+        '<td class="r num">' + (r && Number(r.lateMin) ? '<b class="t-warn">' + r.lateMin + '</b> น.' : '–') + '</td><td class="r num">' + (r && Number(r.earlyMin) ? r.earlyMin + ' น.' : '–') + '</td>' +
+        '<td class="small">' + o.x.recs.map(function (x) { return tag(x.type) + (x.fullDay === 'Y' ? '' : ' ' + x.startTime + '–' + x.endTime); }).join(' ') + (r && r.note ? ' <span class="muted">' + esc(r.note) + '</span>' : '') + '</td>' +
+        '<td><button class="btn sm" data-clk-edit="' + o.p.personId + '">' + (r ? 'แก้ไข' : 'ลงเวลาแทน') + '</button></td></tr>';
+    }).join('') + '</tbody></table>' : '<div class="empty">ไม่มีรายชื่อ</div>';
+  // สรุปรายบุคคลตามช่วงเวลา
+  renderFilters();
+  var pr = periodRange(), all = filteredPeople();
+  $('#clkSumSub').textContent = pr.label + ' · นับตั้งแต่เริ่มใช้ระบบ ' + thDate(clockStart()) + ' ถึงวันนี้ · ไม่นับวันที่มีรายการลาเต็มวัน';
+  var sum = all.map(function (p) { return { p: p, o: attStats(p, pr.from, pr.to) }; }).filter(function (x) { return x.o.work || x.o.present || x.o.leave; })
+    .sort(function (a, b) { return (b.o.absent - a.o.absent) || (b.o.late - a.o.late) || a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+  $('#clkSummary').innerHTML = sum.length ? '<table class="tbl"><thead><tr><th>ชื่อ-สกุล</th>' + attHead() + '</tr></thead><tbody>' + sum.map(function (x) {
+    return '<tr class="click" data-person="' + x.p.personId + '"><td><div class="nm">' + esc(x.p.fullName) + '</div><div class="muted small">' + esc(x.p.ward) + '</div></td>' + attCells(x.o) + '</tr>';
+  }).join('') + '</tbody></table>' : '<div class="empty">ยังไม่มีข้อมูลการลงเวลาในช่วงนี้ (เริ่มใช้ระบบ ' + thDate(clockStart()) + ')</div>';
+};
+$('#clkDate').addEventListener('change', function (e) { st.clkDate = e.target.value || st.d.today; RENDER.clock(); });
+$('#clkTeam').addEventListener('change', function (e) { st.clkTeam = e.target.value; RENDER.clock(); });
+$('#clkQ').addEventListener('input', function (e) { st.clkQ = e.target.value; clearTimeout(st._ck); st._ck = setTimeout(function () { var pos = e.target.selectionStart; RENDER.clock(); var i = $('#clkQ'); i.focus(); try { i.setSelectionRange(pos, pos); } catch (x) {} }, 250); });
+$('#clkTable').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-clk-edit]'); if (b) return openClockModal(b.getAttribute('data-clk-edit'), st.clkDate);
+});
+
+/** แถบ "วันนี้" บนหน้าภาพรวม (ฝ่ายเลขานุการโครงการ) */
+function renderDashToday() {
+  var box = $('#dashToday'); if (!box) return;
+  if (!isStaff()) { box.innerHTML = ''; return; }
+  var d = st.d.today, ppl = filteredPeople({ team: '', div: '' }).filter(function (p) { var w = pWindow(p); return w.s <= d && w.e >= d; });
+  var c = { IN: 0, LATE: 0, LEAVE: 0, MISS: 0 };
+  ppl.forEach(function (p) { var x = dayStatus(p, d); if (x.code === 'IN' || x.code === 'LATE' || x.code === 'EXTRA') c.IN++; if (x.code === 'LATE') c.LATE++; if (x.code === 'LEAVE') c.LEAVE++; if (x.code === 'WAIT' || x.code === 'ABSENT') c.MISS++; });
+  var pend = (st.d.leaveReqs || []).filter(function (q) { return q.status === 'PENDING'; }).length;
+  var accP = (st.d.accounts || []).filter(function (a) { return a.status === 'PENDING'; }).length;
+  box.innerHTML = '<div class="today-strip">' +
+    '<div class="ts-day"><span class="eyebrow">วันนี้</span><b>' + TH_WD_FULL[wd(d)] + ' ' + thDate(d) + '</b></div>' +
+    '<button class="ts-item" data-go="clock"><span>มาปฏิบัติงานแล้ว</span><b class="num">' + c.IN + '<small>/' + ppl.length + '</small></b></button>' +
+    '<button class="ts-item" data-go="clock"><span>มาหลังเวลาที่กำหนด</span><b class="num t-warn">' + c.LATE + '</b></button>' +
+    '<button class="ts-item" data-go="clock"><span>ลาเต็มวัน</span><b class="num">' + c.LEAVE + '</b></button>' +
+    '<button class="ts-item" data-go="clock"><span>ยังไม่ได้ลงเวลา</span><b class="num' + (c.MISS ? ' t-bad' : '') + '">' + c.MISS + '</b></button>' +
+
+    '</div>';
+}
+
+// ================================================================== ฝ่ายเลขานุการโครงการ: รับรองใบลา
+function unitFor(p) {
+  var units = (st.d.units || []).filter(function (u) { return u.active !== 'N'; });
+  var hit = units.filter(function (u) { return u.unit && u.unit !== '*' && u.unit.trim() === String(p.ward || '').trim(); })[0];
+  if (!hit) hit = units.filter(function (u) { return (u.unit === '*' || !u.unit) && u.division === p.division; })[0];
+  return hit || null;
+}
+RENDER.certify = function () {
+  var f = st.cf || (st.cf = { tab: 'CERTIFIED', q: '', month: '' });
+  var all = (st.d.leaveReqs || []);
+  var cnt = { PENDING: 0, CERTIFIED: 0, CLOSED: 0, ALL: all.length };
+  all.forEach(function (q) { if (q.status === 'PENDING') cnt.PENDING++; else if (q.status === 'CERTIFIED') cnt.CERTIFIED++; else cnt.CLOSED++; });
+  $('#certTabs').innerHTML = '<div class="seg">' + [['CERTIFIED', 'บันทึกแล้ว'], ['CLOSED', 'เพิกถอน / ยกเลิก'], ['PENDING', 'รอรับรอง (รายการเดิม)'], ['ALL', 'ทั้งหมด']].map(function (t) {
+    return '<button data-ct="' + t[0] + '"' + (f.tab === t[0] ? ' class="on"' : '') + '>' + t[1] + ' · ' + cnt[t[0]] + '</button>'; }).join('') + '</div>';
+  var months = {}; all.forEach(function (q) { months[ym(q.dateFrom)] = 1; });
+  $('#certFilters').innerHTML = '<div class="field" style="flex:1;min-width:200px"><label>ค้นหา</label><input class="inp" id="cfQ" value="' + esc(f.q) + '" placeholder="ชื่อ / หอผู้ป่วย / เหตุผล"></div>' +
+    '<div class="field"><label>เดือนที่ลา</label><select class="inp" id="cfMonth"><option value="">ทุกเดือน</option>' + Object.keys(months).sort().reverse().map(function (m) { return '<option value="' + m + '"' + (f.month === m ? ' selected' : '') + '>' + thMonth(m, true) + '</option>'; }).join('') + '</select></div>';
+  var q = f.q.toLowerCase();
+  var list = all.filter(function (x) {
+    if (f.tab === 'PENDING' && x.status !== 'PENDING') return false;
+    if (f.tab === 'CERTIFIED' && x.status !== 'CERTIFIED') return false;
+    if (f.tab === 'CLOSED' && (x.status === 'PENDING' || x.status === 'CERTIFIED')) return false;
+    if (f.month && ym(x.dateFrom) !== f.month) return false;
+    var p = IX.people[x.personId] || {};
+    return !q || (p.fullName + ' ' + p.ward + ' ' + x.reason).toLowerCase().indexOf(q) !== -1;
+  }).sort(function (a, b) { return f.tab === 'PENDING' ? (a.dateFrom < b.dateFrom ? -1 : 1) : (a.submittedAt < b.submittedAt ? 1 : -1); });
+  $('#certList').innerHTML = list.length ? list.slice(0, 200).map(certCard).join('') : '<div class="card empty">' + (f.tab === 'PENDING' ? 'ไม่มีรายการค้างรอรับรอง (ระบบบันทึกให้ทันทีตั้งแต่ผู้ใช้กดบันทึก)' : 'ไม่มีรายการ') + '</div>';
+};
+function certCard(q) {
+  var p = IX.people[q.personId] || { fullName: q.personId }, s = LV_ST[q.status] || [q.status, 'na'];
+  var warns = [];
+  var qDates;
+  if (q.dateList) { qDates = q.dateList.split(','); } else {
+    qDates = []; for (var d = q.dateFrom, n = 0; d <= q.dateTo && n < 70; d = addDays(d, 1), n++) qDates.push(d);
+  }
+  qDates.forEach(function (d) {
+    if (!isWorkday(d)) return;
+    var rs = (IX.dayRec[q.personId + '|' + d] || []).filter(function (r) { return !(r.source === 'SELF' && r.raw === q.reqId); });
+    if (rs.length) warns.push(thDate(d) + ': มี ' + rs.map(function (r) { return tlabel(r.type) + (r.fullDay === 'Y' ? ' เต็มวัน' : ''); }).join(', ') + ' อยู่แล้ว');
+    var a = IX.att[q.personId + '|' + d];
+    if (a && q.dur === 'full') warns.push(thDate(d) + ': สแกนเข้างาน ' + hmOf(a.inAt) + ' น. ทั้งที่ลาเต็มวัน');
+  });
+  var u = unitFor(p);
+  var info = '<div><div><span class="nm">' + esc(p.fullName) + '</span> <span class="muted small">' + esc([p.ward, p.division].filter(Boolean).join(' · ')) + '</span></div>' +
+    '<div class="meta">' + tag(q.type) + ' ' + pill(s[0], s[1]) + ' ' + lvLead(q) + ' <span class="muted small">ใบ ' + esc(q.reqId) + '</span></div>' +
+    '<div class="lv-when">' + esc(lvWhen(q)) + ' · <b>' + hrs(Number(q.totalMin), false) + ' ชม.</b></div>' +
+    (q.dateList ? '<div class="small muted" style="margin-top:4px">วันที่เลือก: ' + q.dateList.split(',').map(thDate).join(', ') + '</div>' : '') +
+    (q.reason || q.attachUrl ? '<div class="why">' + (q.reason ? '📝 ' + esc(q.reason) : '') + (q.attachUrl ? (q.reason ? ' · ' : '') + '<a href="' + esc(q.attachUrl) + '" target="_blank" rel="noopener">เปิดเอกสารแนบ</a>' : '') + '</div>' : '') +
+    (warns.length ? '<div class="note warn small" style="margin-top:8px">⚠ ' + warns.slice(0, 6).map(esc).join('<br>⚠ ') + '</div>' : '') +
+    (q.decisionNote ? '<div class="small" style="margin-top:6px"><b>หมายเหตุ:</b> ' + esc(q.decisionNote) + '</div>' : '') +
+    lvSigned(q) +
+    '<div class="muted small" style="margin-top:6px">ยื่นเมื่อ ' + thDate(String(q.submittedAt).slice(0, 10)) + ' ' + esc(String(q.submittedAt).slice(11, 16)) + '</div></div>';
+  var right = '';
+  if (q.status === 'PENDING') {
+    var picks = ['SICK', 'PERSONAL', 'VACATION'].filter(function (c) { return IX.types[c]; });
+    var types = picks.concat(IX.typeOrder.filter(function (c) { return picks.indexOf(c) === -1 && c !== 'UNSPEC'; }));
+    right = '<div class="ed" data-cq="' + q.reqId + '">' +
+      '<div class="row">' + types.slice(0, picks.length).map(function (c) { return '<button type="button" class="pick' + (q.type === c ? ' on' : '') + '" style="--c:' + tcolor(c) + '" data-cq-type="' + c + '"><span class="sw" style="background:' + tcolor(c) + '"></span>' + esc((SHORT[c] || tlabel(c))) + '</button>'; }).join('') +
+      '<select class="inp" data-cq-e="other" style="width:auto;flex:1;min-width:110px"><option value="">ประเภทอื่น…</option>' + types.slice(picks.length).map(function (c) { return '<option value="' + c + '"' + (q.type === c ? ' selected' : '') + '>' + esc(tlabel(c)) + '</option>'; }).join('') + '</select></div>' +
+      '<input type="hidden" data-cq-e="type" value="' + q.type + '">' +
+      '<div class="row"><select class="inp" data-cq-e="dur" style="width:auto">' + [['full', 'เต็มวัน'], ['am', 'ครึ่งเช้า'], ['pm', 'ครึ่งบ่าย'], ['time', 'ระบุเวลา']].map(function (o) { return '<option value="' + o[0] + '"' + (q.dur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
+      '<input class="inp" type="time" data-cq-e="start" value="' + esc(q.startTime || '13:00') + '" style="width:110px"' + (q.dur === 'time' ? '' : ' hidden') + '>' +
+      '<input class="inp" type="time" data-cq-e="end" value="' + esc(q.endTime || '15:00') + '" style="width:110px"' + (q.dur === 'time' ? '' : ' hidden') + '></div>' +
+      '<input class="inp" data-cq-e="note" placeholder="หมายเหตุถึงผู้ยื่น (จำเป็นเมื่อไม่รับรอง)">' +
+      '<div class="mail-to small">' + (u ? '✉ อีเมลถึงหัวหน้า: <b>' + esc(u.headName || '') + '</b> ' + esc(u.headEmails) : '<span class="t-warn">⚠ ยังไม่ได้กำหนดอีเมลหัวหน้าหน่วยงานของ "' + esc(p.ward || p.division || '-') + '"</span> · <a href="#" data-go="users" data-ut="UNITS">ตั้งค่า</a>') +
+      (S('EMAIL_NOTIFY') === 'N' ? ' <span class="muted">(ปิดการส่งอีเมลอยู่)</span>' : '') + '</div>' +
+      '<div class="row" style="justify-content:flex-end"><button class="btn sm danger" data-cq-go="REJECT">✗ ไม่รับรอง</button><button class="btn sm primary" data-cq-go="CERTIFY">✓ รับรองและแจ้งหัวหน้า</button></div></div>';
+  } else if (q.status === 'CERTIFIED') {
+    var off = isOffDuty(q.type);
+    right = '<div class="ed"><div class="small">บันทึกเข้าตารางการลา ' + String(q.recordIds || '').split(',').filter(String).length + ' รายการ</div>' +
+      (off ? '<div class="muted small">วันหยุดตามรอบเวร — ไม่ต้องแจ้งหัวหน้าหน่วยงาน</div>'
+           : '<div class="mail-to small">' + (u ? '✉ หัวหน้าหน่วยงาน: <b>' + esc(u.headName || '') + '</b> ' + esc(u.headEmails)
+                                                : '<span class="t-warn">⚠ ยังไม่ได้กำหนดอีเมลหัวหน้าหน่วยงานของ "' + esc(p.ward || p.division || '-') + '"</span> · <a href="#" data-go="users" data-ut="UNITS">ตั้งค่า</a>') +
+             (S('EMAIL_NOTIFY') === 'N' ? ' <span class="muted">(ปิดการส่งอีเมลอยู่)</span>' : '') + '</div>' +
+             '<div class="muted small">' + (q.mailedTo ? '✉ ส่งอีเมลแจ้งหัวหน้าแล้ว: ' + esc(q.mailedTo) + ' · ' + thDate(String(q.mailedAt).slice(0, 10))
+                                                       : '✉ ยังไม่ได้ส่งอีเมลแจ้งหัวหน้าหน่วยงาน') + '</div>') +
+      '<div class="row" style="justify-content:flex-end">' +
+      (off ? '' : '<button class="btn sm primary" data-cq-mail="' + q.reqId + '">✉ ' + (q.mailedTo ? 'ส่งอีเมลซ้ำ' : 'ส่งอีเมลแจ้งหัวหน้า') + '</button>') +
+      '<button class="btn sm" data-open-person="' + q.personId + '">ดูรายบุคคล</button>' +
+      '<button class="btn sm danger" data-cq-revoke="' + q.reqId + '">เพิกถอน</button></div></div>';
+  }
+  return '<div class="rv2 ' + (right ? 'cert' : 'view') + '" id="cq-' + q.reqId + '">' + info + right + '</div>';
+}
+$('#leaveTabCert').addEventListener('click', function (e) {
+  var f = st.cf;
+  var t = e.target.closest('[data-ct]'); if (t) { f.tab = t.getAttribute('data-ct'); return RENDER.certify(); }
+  var pk = e.target.closest('[data-cq-type]');
+  if (pk) { var box = pk.closest('[data-cq]'); $$('.pick', box).forEach(function (b) { b.classList.toggle('on', b === pk); }); $('[data-cq-e="type"]', box).value = pk.getAttribute('data-cq-type'); $('[data-cq-e="other"]', box).value = ''; return; }
+  var go2 = e.target.closest('[data-cq-go]'); if (go2) return certDecide(go2.closest('[data-cq]').getAttribute('data-cq'), go2.getAttribute('data-cq-go'), go2);
+  var rv = e.target.closest('[data-cq-revoke]'); if (rv) return certRevoke(rv.getAttribute('data-cq-revoke'));
+  var ml = e.target.closest('[data-cq-mail]'); if (ml) return certSendMail(ml.getAttribute('data-cq-mail'), ml);
+});
+
+/** ฝ่ายเลขานุการโครงการส่งอีเมลแจ้งหัวหน้าหน่วยงานเองรายใบ */
+function certSendMail(reqId, btn) {
+  var label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'กำลังส่ง…';
+  call('apiSendLeaveMail', st.token, reqId).then(function (r) {
+    var i = st.d.leaveReqs.findIndex(function (x) { return x.reqId === reqId; });
+    if (i >= 0) st.d.leaveReqs[i] = r.req;
+    toast('ส่งอีเมลแจ้งหัวหน้าหน่วยงานแล้ว (' + r.mail.to.join(', ') + ')');
+    RENDER.certify();
+  }).catch(function (er) { handleErr(er); btn.disabled = false; btn.textContent = label; });
+}
+$('#leaveTabCert').addEventListener('change', function (e) {
+  if (e.target.id === 'cfMonth') { st.cf.month = e.target.value; return RENDER.certify(); }
+  var en = e.target.getAttribute('data-cq-e'), box = e.target.closest('[data-cq]'); if (!en || !box) return;
+  if (en === 'other' && e.target.value) { $('[data-cq-e="type"]', box).value = e.target.value; $$('.pick', box).forEach(function (b) { b.classList.remove('on'); }); }
+  if (en === 'dur') { var tm = e.target.value === 'time'; $('[data-cq-e="start"]', box).hidden = !tm; $('[data-cq-e="end"]', box).hidden = !tm; }
+});
+$('#leaveTabCert').addEventListener('input', function (e) {
+  if (e.target.id !== 'cfQ') return;
+  st.cf.q = e.target.value; clearTimeout(st._cq);
+  st._cq = setTimeout(function () { var pos = e.target.selectionStart; RENDER.certify(); var i = $('#cfQ'); i.focus(); try { i.setSelectionRange(pos, pos); } catch (x) {} }, 250);
+});
+function certDecide(reqId, decision, btn) {
+  var box = $('[data-cq="' + reqId + '"]');
+  function v(n) { return $('[data-cq-e="' + n + '"]', box).value; }
+  var note = v('note').trim();
+  if (decision === 'REJECT' && note.length < 3) { toast('กรณีไม่รับรอง กรุณาระบุเหตุผลในช่องหมายเหตุ', true); $('[data-cq-e="note"]', box).focus(); return; }
+  var me = editorOf(st.d.actor);
+  if (decision === 'CERTIFY' && !(me && me.signature)) { toast('กรุณาวาดลายมือชื่อก่อนรับรองครั้งแรก'); return openSignatureModal(function () { certDecide(reqId, decision, btn); }); }
+  var patch = { type: v('type'), dur: v('dur'), startTime: v('start'), endTime: v('end') };
+  $$('button', box).forEach(function (b) { b.disabled = true; });
+  call('apiDecideLeave', st.token, reqId, decision, note, patch).then(function (r) {
+    var i = st.d.leaveReqs.findIndex(function (x) { return x.reqId === reqId; }); st.d.leaveReqs[i] = r.req;
+    (r.records || []).forEach(function (x) { st.d.records.push(x); });
+    buildIndex();
+    var m = r.mail || {};
+    toast(decision === 'REJECT' ? 'บันทึก "ไม่รับรอง" แล้ว · แจ้งผู้ยื่นทางอีเมล' :
+      'รับรองแล้ว · ' + (m.to && m.to.length ? (m.ok === false ? 'ส่งอีเมลไม่สำเร็จ: ' + m.error : 'แจ้งหัวหน้า ' + m.to.join(', ')) : (m.skipped || 'ไม่ได้ส่งอีเมล')), m.ok === false);
+    RENDER.certify();
+  }).catch(function (e) { handleErr(e); $$('button', box).forEach(function (b) { b.disabled = false; }); });
+}
+function certRevoke(reqId) {
+  openModal('<h3>เพิกถอนการรับรอง ' + esc(reqId) + '</h3><p class="muted small">รายการในตารางการลาจะถูกซ่อน และระบบแจ้งหัวหน้า/ผู้ยื่นทางอีเมล</p>' +
+    '<div class="field"><label>เหตุผล *</label><input class="inp" id="rvNote" placeholder="เช่น ผู้ยื่นแจ้งยกเลิกการลา"></div>' +
+    '<div class="actions"><button class="btn" data-close>ยกเลิก</button><button class="btn danger" id="rvGo">เพิกถอน</button></div>');
+  $('#rvGo').onclick = function () {
+    var b = this; b.disabled = true;
+    call('apiRevokeLeave', st.token, reqId, $('#rvNote').value).then(function (r) {
+      var i = st.d.leaveReqs.findIndex(function (x) { return x.reqId === reqId; }); st.d.leaveReqs[i] = r.req;
+      st.d.records = st.d.records.filter(function (x) { return r.deletedIds.indexOf(x.recordId) === -1; });
+      buildIndex(); closeModal(); toast('เพิกถอนการรับรองเรียบร้อยแล้ว'); RENDER.certify();
+    }).catch(function (e) { handleErr(e); b.disabled = false; });
+  };
+}
+
+// ================================================================== ฝ่ายเลขานุการโครงการ: ผู้ใช้ & หน่วยงาน
+RENDER.users = function () {
+  var t = st.ut || (st.ut = 'PENDING');
+  var acc = st.d.accounts || [];
+  var n = { PENDING: acc.filter(function (a) { return a.status === 'PENDING'; }).length, ALL: acc.length, UNITS: (st.d.units || []).length,
+            STATION: acc.filter(function (a) { return a.role === 'STATION'; }).length };
+  $('#userTabs').innerHTML = '<div class="seg">' + [['PENDING', 'รออนุมัติ'], ['ALL', 'บัญชีทั้งหมด'], ['UNITS', 'หน่วยงาน & อีเมลหัวหน้า'], ['STATION', 'จุดลงเวลา']].map(function (x) {
+    return '<button data-ut="' + x[0] + '"' + (t === x[0] ? ' class="on"' : '') + '>' + x[1] + ' · ' + n[x[0]] + '</button>'; }).join('') + '</div>';
+  ({ PENDING: usersPending, ALL: usersAll, UNITS: usersUnits, STATION: usersStation }[t])();
+};
+function linkedSet() { var m = {}; (st.d.accounts || []).forEach(function (a) { if (a.personId && a.status === 'ACTIVE') m[a.personId] = a; }); return m; }
+function personOptions(sel, suggest) {
+  var linked = linkedSet();
+  var ppl = st.d.people.filter(function (p) { return p.role === 'KEY_USER'; }).sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  var sp = suggest && IX.people[suggest];
+  return '<option value="">— เลือกรายชื่อผู้ปฏิบัติงานโครงการ —</option>' + (sp ? '<option value="' + sp.personId + '"' + (sel === sp.personId ? ' selected' : '') + '>★ แนะนำ: ' + esc(sp.fullName) + (sp.sap ? ' (' + sp.sap + ')' : '') + '</option>' : '') +
+    ppl.filter(function (p) { return !sp || p.personId !== sp.personId; }).map(function (p) {
+      return '<option value="' + p.personId + '"' + (sel === p.personId ? ' selected' : '') + (linked[p.personId] && linked[p.personId].personId !== sel ? ' disabled' : '') + '>' + esc(p.fullName) + (p.sap ? ' (' + p.sap + ')' : '') + (linked[p.personId] ? ' · มีบัญชีแล้ว' : '') + '</option>';
+    }).join('') + '<option value="NEW">+ สร้างรายชื่อใหม่จากข้อมูลที่สมัคร</option>';
+}
+function usersPending() {
+  var list = (st.d.accounts || []).filter(function (a) { return a.status === 'PENDING'; });
+  $('#userBody').innerHTML = list.length ? '<div class="check-list">' + list.map(function (a) {
+    return '<div class="rv2 cert" data-acc="' + a.accountId + '"><div><div><span class="nm">' + esc(a.fullName) + '</span> ' + pill('รออนุมัติ', 'warn') + '</div>' +
+      '<div class="meta">ชื่อผู้ใช้ <b>' + esc(a.username) + '</b>' + (a.sap ? ' · SAP ' + esc(a.sap) : '') + (a.team ? ' · Team ' + esc(TEAM_L[a.team] || a.team) : '') + '</div>' +
+      '<div class="why">' + esc([a.ward, a.division].filter(Boolean).join(' · ') || '-') + '<br><span class="muted">' + esc([a.email, a.phone].filter(Boolean).join(' · ') || 'ยังไม่ได้ระบุอีเมล/โทรศัพท์') + '</span></div>' +
+      '<div class="muted small" style="margin-top:6px">สมัครเมื่อ ' + thDate(String(a.createdAt).slice(0, 10)) + ' ' + esc(String(a.createdAt).slice(11, 16)) + (a.note ? ' · ' + esc(a.note) : '') + '</div></div>' +
+      '<div class="ed"><label class="small"><b>ผูกกับรายชื่อ</b></label><select class="inp" data-ap="person">' + personOptions(a.suggest || '', a.suggest) + '</select>' +
+      '<label class="small"><b>สิทธิ์</b></label><select class="inp" data-ap="role"><option value="MEMBER">ผู้ปฏิบัติงานโครงการ</option><option value="SECRETARY">ฝ่ายเลขานุการโครงการ</option><option value="STATION">จุดลงเวลา</option></select>' +
+      '<div class="row" style="justify-content:flex-end"><button class="btn sm danger" data-ap-go="REJECT">ปฏิเสธ</button><button class="btn sm primary" data-ap-go="APPROVE">✓ อนุมัติบัญชี</button></div></div></div>';
+  }).join('') + '</div>' : '<div class="card empty">ไม่มีบัญชีรออนุมัติ</div>';
+}
+function usersAll() {
+  var q = String(st.uq || '').toLowerCase();
+  var list = (st.d.accounts || []).filter(function (a) { return !q || (a.fullName + ' ' + a.username + ' ' + a.sap).toLowerCase().indexOf(q) !== -1; })
+    .sort(function (a, b) { return (a.role + a.fullName).localeCompare(b.role + b.fullName, 'th'); });
+  $('#userBody').innerHTML = '<div class="card"><div class="card-head"><div><h2>บัญชีทั้งหมด</h2><p class="sub">เลือก "จัดการ" เพื่อเปลี่ยนสิทธิ์ ระงับการใช้งาน กำหนดรหัสผ่านใหม่ หรือเปลี่ยนรายชื่อที่ผูกไว้</p></div>' +
+    '<input class="inp" id="uQ" value="' + esc(st.uq || '') + '" placeholder="ค้นหาชื่อ / ชื่อผู้ใช้" style="max-width:260px"></div>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ชื่อ</th><th>ชื่อผู้ใช้</th><th>สิทธิ์</th><th>สถานะ</th><th>ผูกกับ</th><th>เข้าใช้ล่าสุด</th><th></th></tr></thead><tbody>' +
+    list.map(function (a) {
+      var s = ACC_ST[a.status] || [a.status, 'na'], p = IX.people[a.personId];
+      return '<tr><td class="nm">' + esc(a.fullName) + '</td><td class="small">' + esc(a.username) + '</td><td>' + esc(ROLE_TH[a.role] || a.role) + '</td><td>' + pill(s[0], s[1]) + '</td>' +
+        '<td class="small">' + (p ? esc(p.fullName) : '<span class="muted">–</span>') + '</td><td class="small">' + (a.lastLoginAt ? thDate(a.lastLoginAt.slice(0, 10)) + ' ' + a.lastLoginAt.slice(11, 16) : '–') + '</td>' +
+        '<td><button class="btn sm" data-acc-manage="' + a.accountId + '">จัดการ</button></td></tr>';
+    }).join('') + '</tbody></table></div></div>';
+}
+/** แถวทะเบียนที่ตรงกับหน่วยงานนี้แบบเจาะจง (ไม่เอาแถว * ของทั้งงานการพยาบาล) */
+function unitRowExact(ward) {
+  return (st.d.units || []).filter(function (u) { return u.unit && u.unit !== '*' && u.unit.trim() === String(ward || '').trim(); })[0] || null;
+}
+/**
+ * ช่อง "ประเภทบุคลากร" ของหนึ่งหน่วยงาน — ไม่ใช่ค่าที่ระบบเอาไปเดาแล้ว
+ * แสดงว่าในหน่วยนี้มีคนประเภทไหนกี่คน และให้กดเติมประเภทให้ทุกคนในหน่วยทีเดียว
+ */
+function unitKindCell(ward, division) {
+  var list = (st.d.people || []).filter(function (p) {
+    return p.status !== 'LEFT' && p.ward === ward && p.division === division;
+  });
+  var ids = list.map(function (p) { return p.personId; });
+  var cnt = kindCounts(list);
+  var chips = GRP_ORDER.filter(function (g) { return cnt[g]; }).map(function (g) {
+    return '<span class="pill ' + (g === 'UNSET' ? 'warn' : 'na') + '" style="margin:0 4px 4px 0">' +
+      esc(GRP_L[g]) + ' ' + cnt[g] + '</span>';
+  }).join('');
+  return '<div>' + (chips || '<span class="muted small">ไม่มีสมาชิก</span>') + '</div>' +
+    (ids.length ? '<select class="inp sm" data-ukfill="' + esc(ids.join(',')) + '" style="margin-top:4px">' +
+      [['', 'เติมประเภทให้ทุกคนในหน่วยนี้…']].concat(GRP_PICK.map(function (g) { return [g, '→ ' + GRP_L[g]]; }))
+        .map(function (o) { return '<option value="' + o[0] + '">' + esc(o[1]) + '</option>'; }).join('') + '</select>' : '');
+}
+function usersUnits() {
+  var units = (st.d.units || []).slice(), wards = {};
+  st.d.people.forEach(function (p) { if (p.role === 'KEY_USER' && p.status !== 'LEFT' && p.ward) { var k = p.ward + '|' + p.division; wards[k] = wards[k] || { ward: p.ward, division: p.division, n: 0 }; wards[k].n++; } });
+  var rows = Object.keys(wards).map(function (k) { var w = wards[k]; return { w: w, u: unitFor({ ward: w.ward, division: w.division }), x: unitRowExact(w.ward) }; })
+    .sort(function (a, b) { return (!!a.u - !!b.u) || (a.w.division + a.w.ward).localeCompare(b.w.division + b.w.ward, 'th'); });
+  var missing = rows.filter(function (r) { return !r.u || !r.u.headEmails; }).length;
+  var noKind = (st.d.people || []).filter(function (p) { return p.status !== 'LEFT' && kindUnset(p); }).length;
+  $('#userBody').innerHTML = '<div class="card"><div class="card-head"><div><h2>ทะเบียนหน่วยงาน</h2><p class="sub">' +
+    '“ประเภทบุคลากร” เป็นค่ารายคน (OPD / IPD / ER / OR) หนึ่งหน่วยงานมีได้หลายประเภทปนกัน · เลือกจากช่องในตารางเพื่อเติมให้ทุกคนในหน่วยทีเดียว หรือแก้ทีละคนที่หน้ารายบุคคล · อีเมลหัวหน้าใช้ส่งใบลาที่บันทึกแล้ว กรณีไม่ได้กำหนดรายหน่วยงาน ระบบจะใช้แถว "ทั้งงานการพยาบาล" แทน' +
+    (S('EMAIL_NOTIFY') === 'N' ? ' · <b class="t-bad">ตอนนี้ปิดการส่งอีเมล (Settings › EMAIL_NOTIFY)</b>' : '') + '</p></div>' +
+    '<button class="btn sm primary" data-unit-new="*">+ ตั้งทั้งงานการพยาบาล</button></div>' +
+    (noKind ? '<div class="note warn" style="margin-bottom:12px">ยังไม่ได้ระบุประเภทบุคลากร ' + noKind + ' คน — หน้าภาพรวมจะรวมไว้ในกลุ่ม "ยังไม่ระบุประเภท" จนกว่าจะระบุ</div>' : '') +
+    (missing ? '<div class="note warn" style="margin-bottom:12px">ยังไม่ได้กำหนดอีเมลหัวหน้าหน่วยงาน ' + missing + ' หน่วย — ใบลาของบุคลากรในหน่วยงานเหล่านี้จะไม่มีอีเมลแจ้งหัวหน้าหน่วยงาน</div>' : '') +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>หอผู้ป่วย / หน่วย</th><th>งานการพยาบาล</th><th class="r">ผู้ปฏิบัติงานโครงการ</th><th style="min-width:220px">ประเภทบุคลากร</th><th>หัวหน้า</th><th>อีเมล</th><th></th></tr></thead><tbody>' +
+    rows.map(function (r) {
+      var mail = r.u && r.u.headEmails;
+      return '<tr><td class="nm">' + esc(r.w.ward) + '</td><td class="small">' + esc(r.w.division) + '</td><td class="r num">' + r.w.n + '</td>' +
+        '<td>' + unitKindCell(r.w.ward, r.w.division) + '</td>' +
+        (mail ? '<td>' + esc(r.u.headName || '-') + (r.u.unit === '*' ? ' <span class="muted small">(ทั้งงาน)</span>' : '') + '</td>' +
+            '<td class="small">' + esc(r.u.headEmails) + (r.u.ccEmails ? '<br><span class="muted">สำเนา ' + esc(r.u.ccEmails) + '</span>' : '') + '</td>' +
+            '<td style="white-space:nowrap"><button class="btn sm" data-unit-edit="' + r.u.unitId + '">แก้ไข</button> <button class="btn sm" data-unit-test="' + r.u.unitId + '">ส่งทดสอบ</button></td>'
+          : '<td colspan="2">' + pill('ยังไม่ได้กำหนดอีเมล', 'warn') + '</td>' +
+            '<td><button class="btn sm primary" data-unit-new="' + esc(r.w.ward) + '" data-div="' + esc(r.w.division) + '">+ กำหนดอีเมล</button></td>') + '</tr>';
+    }).join('') + '</tbody></table></div>' +
+    (units.filter(function (u) { return u.unit === '*'; }).length ? '<h3 style="margin:22px 0 8px;font-size:16px">ตั้งทั้งงานการพยาบาล</h3><div class="tbl-wrap"><table class="tbl"><tbody>' +
+      units.filter(function (u) { return u.unit === '*'; }).map(function (u) {
+      return '<tr><td class="nm">' + esc(u.division) + '</td><td>' + esc(u.headName || '-') + '</td><td class="small">' + esc(u.headEmails || '–') + '</td>' +
+        '<td style="white-space:nowrap"><button class="btn sm" data-unit-edit="' + u.unitId + '">แก้ไข</button>' +
+        (u.headEmails ? ' <button class="btn sm" data-unit-test="' + u.unitId + '">ส่งทดสอบ</button>' : '') + '</td></tr>';
+    }).join('') + '</tbody></table></div>' : '') + '</div>';
+}
+// เติมประเภทบุคลากรให้ทุกคนในหน่วยงานทีเดียว — เขียนลงแถวรายคน ไม่ได้เก็บไว้ที่หน่วยงาน
+document.addEventListener('change', function (e) {
+  var sel = e.target.closest('[data-ukfill]'); if (!sel || !sel.value) return;
+  var kind = sel.value, ids = sel.getAttribute('data-ukfill').split(',').filter(String);
+  if (!confirm('กำหนดให้บุคลากร ' + ids.length + ' คนในหน่วยนี้เป็น "' + GRP_L[kind] + '" ทั้งหมดใช่หรือไม่\n(ค่าเดิมของแต่ละคนจะถูกเขียนทับ)')) {
+    sel.value = ''; return;
+  }
+  sel.disabled = true;
+  call('apiSetUnitKindBulk', st.token, ids, kind).then(function (res) {
+    (st.d.people || []).forEach(function (p) { if (ids.indexOf(p.personId) !== -1) p.unitKind = res.kind; });
+    buildIndex();
+    toast('กำหนดประเภทให้ ' + res.changed + ' คนแล้ว' + (res.changed < res.updated ? ' (อีก ' + (res.updated - res.changed) + ' คนเป็นประเภทนี้อยู่แล้ว)' : ''));
+    RENDER.users();
+  }).catch(function (er) { handleErr(er); sel.disabled = false; sel.value = ''; });
+});
+
+function usersStation() {
+  var list = (st.d.accounts || []).filter(function (a) { return a.role === 'STATION'; });
+  $('#userBody').innerHTML = '<div class="grid g-main"><div class="card"><h2>บัญชีจุดลงเวลา</h2><p class="sub">ใช้เข้าสู่ระบบบนแท็บเล็ตหรือโทรศัพท์มือถือที่ติดตั้งไว้หน้าห้อง · สแกนรหัส QR ได้เพียงอย่างเดียว ไม่สามารถเข้าถึงข้อมูลการลา</p>' +
+    (list.length ? '<table class="tbl"><thead><tr><th>ชื่อ</th><th>ชื่อผู้ใช้</th><th>สถานะ</th><th></th></tr></thead><tbody>' + list.map(function (a) {
+      var s = ACC_ST[a.status] || [a.status, 'na'];
+      return '<tr><td class="nm">' + esc(a.fullName) + '</td><td>' + esc(a.username) + '</td><td>' + pill(s[0], s[1]) + '</td><td><button class="btn sm" data-acc-manage="' + a.accountId + '">จัดการ</button></td></tr>';
+    }).join('') + '</tbody></table>' : '<div class="empty">ยังไม่มีบัญชีจุดลงเวลา</div>') + '</div>' +
+    '<div class="card"><h2>สร้างบัญชีใหม่</h2><p class="sub">ระบบจะสร้างรหัสผ่านชั่วคราวให้</p><div class="form-grid">' +
+    '<div class="field full"><label>ชื่อผู้ใช้</label><input class="inp" id="nsUser" placeholder="เช่น station-5a"></div>' +
+    '<div class="field full"><label>ชื่อที่แสดง</label><input class="inp" id="nsName" placeholder="เช่น จุดลงเวลา ห้องประชุมชั้น 5"></div>' +
+    '<div class="field full"><label>ประเภท</label><select class="inp" id="nsRole"><option value="STATION">จุดลงเวลา</option><option value="SECRETARY">ฝ่ายเลขานุการโครงการ (บังคับเปลี่ยนรหัสครั้งแรก)</option></select></div></div>' +
+    '<div class="actions-row"><button class="btn primary" id="nsGo">สร้างบัญชี</button></div></div></div>';
+}
+function showTempPw(r, title) {
+  openModal('<h3>' + esc(title) + '</h3><p class="muted small">แจ้งรหัสนี้ให้เจ้าของบัญชี — แสดงครั้งเดียว ระบบไม่เก็บรหัสจริงไว้</p>' +
+    '<div class="temp-pw"><div><span>ชื่อผู้ใช้</span><b>' + esc(r.username || (r.account && r.account.username)) + '</b></div><div><span>รหัสผ่านชั่วคราว</span><b class="mono">' + esc(r.tempPassword) + '</b></div></div>' +
+    '<div class="actions"><button class="btn primary" data-close>เสร็จแล้ว</button></div>');
+}
+function accReplace(acc) { var i = st.d.accounts.findIndex(function (x) { return x.accountId === acc.accountId; }); if (i >= 0) st.d.accounts[i] = acc; else st.d.accounts.push(acc); updateBadges(); }
+$('#page-users').addEventListener('click', function (e) {
+  var t = e.target.closest('[data-ut]'); if (t) { st.ut = t.getAttribute('data-ut'); return RENDER.users(); }
+  var ap = e.target.closest('[data-ap-go]');
+  if (ap) {
+    var card = ap.closest('[data-acc]'), id = card.getAttribute('data-acc'), act = ap.getAttribute('data-ap-go');
+    var pid = $('[data-ap="person"]', card).value, role = $('[data-ap="role"]', card).value;
+    ap.disabled = true;
+    var job = act === 'REJECT' ? call('apiUpdateAccount', st.token, id, { status: 'REJECTED' })
+      : call('apiApproveAccount', st.token, id, { personId: pid, role: role });
+    return job.then(function (acc) {
+      accReplace(acc); toast(act === 'REJECT' ? 'ปฏิเสธบัญชีแล้ว' : 'อนุมัติบัญชี ' + acc.username + ' แล้ว');
+      if (pid === 'NEW') return load(true);
+      RENDER.users();
+    }).catch(function (er) { handleErr(er); ap.disabled = false; });
+  }
+  var mg = e.target.closest('[data-acc-manage]'); if (mg) return manageAccount(mg.getAttribute('data-acc-manage'));
+  var un = e.target.closest('[data-unit-new]'); if (un) return openUnitModal({ unit: un.getAttribute('data-unit-new'), division: un.getAttribute('data-div') || '' });
+  var ue = e.target.closest('[data-unit-edit]'); if (ue) return openUnitModal((st.d.units || []).filter(function (u) { return u.unitId === ue.getAttribute('data-unit-edit'); })[0]);
+  var ut = e.target.closest('[data-unit-test]');
+  if (ut) {
+    ut.disabled = true;
+    return call('apiTestUnitMail', st.token, ut.getAttribute('data-unit-test')).then(function (r) { toast('ส่งอีเมลทดสอบไปยัง ' + r.to.join(', ') + ' แล้ว'); })
+      .catch(handleErr).then(function () { ut.disabled = false; });
+  }
+  if (e.target.id === 'nsGo') {
+    var b = e.target; b.disabled = true;
+    return call('apiCreateAccount', st.token, { username: $('#nsUser').value, fullName: $('#nsName').value, role: $('#nsRole').value }).then(function (r) {
+      accReplace(r.account); RENDER.users(); showTempPw(r, 'สร้างบัญชีแล้ว');
+    }).catch(handleErr).then(function () { b.disabled = false; });
+  }
+});
+$('#page-users').addEventListener('input', function (e) {
+  if (e.target.id !== 'uQ') return;
+  st.uq = e.target.value; clearTimeout(st._uq);
+  st._uq = setTimeout(function () { var pos = e.target.selectionStart; usersAll(); var i = $('#uQ'); i.focus(); try { i.setSelectionRange(pos, pos); } catch (x) {} }, 250);
+});
+document.addEventListener('click', function (e) {     // ลิงก์ "ตั้งค่า" จากการ์ดรับรอง → แท็บหน่วยงาน
+  var l = e.target.closest('a[data-ut]'); if (l) st.ut = l.getAttribute('data-ut');
+}, true);
+function manageAccount(id) {
+  var a = (st.d.accounts || []).filter(function (x) { return x.accountId === id; })[0]; if (!a) return;
+  openModal('<h3>' + esc(a.fullName) + '</h3><p class="muted small">ชื่อผู้ใช้ ' + esc(a.username) + ' · สมัคร ' + thDate(String(a.createdAt).slice(0, 10)) + (a.approvedBy ? ' · อนุมัติโดย ' + esc(a.approvedBy) : '') + '</p><div class="form-grid">' +
+    '<div class="field"><label>สิทธิ์</label><select class="inp" id="maRole">' + [['MEMBER', 'ผู้ปฏิบัติงานโครงการ'], ['SECRETARY', 'ฝ่ายเลขานุการโครงการ'], ['STATION', 'จุดลงเวลา']].map(function (o) { return '<option value="' + o[0] + '"' + (a.role === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>' +
+    '<div class="field"><label>สถานะ</label><select class="inp" id="maSt">' + [['ACTIVE', 'ใช้งาน'], ['SUSPENDED', 'ระงับ'], ['REJECTED', 'ปฏิเสธ']].map(function (o) { return '<option value="' + o[0] + '"' + (a.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>' +
+    '<div class="field full"><label>ผูกกับรายชื่อ (ผู้ปฏิบัติงานโครงการ)</label><select class="inp" id="maP">' + personOptions(a.personId).replace('<option value="NEW">+ สร้างรายชื่อใหม่จากข้อมูลที่สมัคร</option>', '') + '</select></div></div>' +
+    '<div class="actions"><button class="btn" id="maReset" style="margin-right:auto">กำหนดรหัสผ่านใหม่</button><button class="btn" data-close>ปิด</button><button class="btn primary" id="maSave">บันทึก</button></div>');
+  $('#maSave').onclick = function () {
+    var b = this; b.disabled = true;
+    call('apiUpdateAccount', st.token, id, { role: $('#maRole').value, status: $('#maSt').value, personId: $('#maP').value }).then(function (acc) {
+      accReplace(acc); closeModal(); toast('บันทึกข้อมูลเรียบร้อยแล้ว'); RENDER.users();
+    }).catch(function (er) { handleErr(er); b.disabled = false; });
+  };
+  $('#maReset').onclick = function () {
+    var b = this;
+    if (b.getAttribute('data-sure') !== '1') { b.setAttribute('data-sure', '1'); b.textContent = 'เลือกอีกครั้งเพื่อยืนยัน'; return; }
+    b.disabled = true;
+    call('apiResetPassword', st.token, id).then(function (r) { showTempPw(r, 'กำหนดรหัสผ่านใหม่เรียบร้อยแล้ว'); }).catch(function (er) { handleErr(er); b.disabled = false; });
+  };
+}
+function openUnitModal(u) {
+  u = u || {};
+  var all = u.unit === '*';
+  openModal('<h3>' + (u.unitId ? 'แก้ไขอีเมลหัวหน้าหน่วยงาน' : 'กำหนดอีเมลหัวหน้าหน่วยงาน') + '</h3><p class="muted small">' + (all ? 'ใช้กับทุกหอผู้ป่วยในงานการพยาบาลนี้ที่ยังไม่ได้กำหนดรายหน่วยงาน' : 'เทียบกับ "หอผู้ป่วย / หน่วย" ในข้อมูลบุคคล') + '</p><div class="form-grid">' +
+    '<div class="field"><label>หอผู้ป่วย / หน่วย (* = ทั้งงาน)</label><input class="inp" id="unU" value="' + esc(u.unit || '') + '"></div>' +
+    '<div class="field"><label>งานการพยาบาล</label><input class="inp" id="unD" value="' + esc(u.division || '') + '" list="divList"><datalist id="divList">' + IX.divisions.map(function (d) { return '<option value="' + esc(d) + '">'; }).join('') + '</datalist></div>' +
+    '<div class="field"><label>ประเภทหน่วยงาน (หน้าภาพรวม)</label><select class="inp" id="unK">' +
+      [['', 'ยังไม่ได้กำหนด']].concat(GRP_ORDER.map(function (g) { return [g, GRP_L[g]]; })).map(function (o) {
+        return '<option value="' + o[0] + '"' + (o[0] === String(u.kind || '').toUpperCase() ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></div>' +
+    '<div class="field full"><label>ชื่อหัวหน้า</label><input class="inp" id="unH" value="' + esc(u.headName || '') + '" placeholder="เช่น นางสาว ก. หัวหน้าหอผู้ป่วย"></div>' +
+    '<div class="field full"><label>อีเมลหัวหน้า (หลายอีเมลคั่นด้วย ,)</label><input class="inp" id="unE" value="' + esc(u.headEmails || '') + '" inputmode="email"></div>' +
+    '<div class="field full"><label>สำเนาถึง (ถ้ามี)</label><input class="inp" id="unC" value="' + esc(u.ccEmails || '') + '" inputmode="email"></div></div>' +
+    '<div class="actions">' + (u.unitId ? '<button class="btn danger" id="unDel" style="margin-right:auto">ลบ</button>' : '') + '<button class="btn" data-close>ยกเลิก</button><button class="btn primary" id="unGo">บันทึก</button></div>');
+  $('#unGo').onclick = function () {
+    var b = this; b.disabled = true;
+    call('apiSaveUnit', st.token, { unitId: u.unitId, unit: $('#unU').value, division: $('#unD').value, headName: $('#unH').value, headEmails: $('#unE').value, ccEmails: $('#unC').value, kind: $('#unK').value }).then(function (x) {
+      var list = st.d.units || (st.d.units = []); var i = list.findIndex(function (y) { return y.unitId === x.unitId; }); if (i >= 0) list[i] = x; else list.push(x);
+      closeModal(); toast('บันทึกอีเมลหัวหน้าหน่วยงานเรียบร้อยแล้ว'); RENDER.users();
+    }).catch(function (er) { handleErr(er); b.disabled = false; });
+  };
+  if (u.unitId) $('#unDel').onclick = confirmDelete(function () {
+    return call('apiDeleteUnit', st.token, u.unitId).then(function () { st.d.units = st.d.units.filter(function (y) { return y.unitId !== u.unitId; }); });
+  });
+}
+
+// ================================================================== รายบุคคล: การลงเวลา
+function renderPersonAttendance(p, fy) {
+  var months = fyMonths(fy), fr = rangeOfMonths(months);
+  if (clockStart() > fr.to && !(st.d.attendance || []).some(function (r) { return r.personId === p.personId && r.date >= fr.from && r.date <= fr.to; })) {
+    $('#pAttendance').innerHTML = '<div class="empty">เริ่มใช้ระบบลงเวลา ' + thDate(clockStart()) + ' — ยังไม่มีข้อมูลในปีงบประมาณนี้</div>'; return;
+  }
+  var tot = { work: 0, present: 0, late: 0, lateMin: 0, early: 0, earlyMin: 0, noOut: 0, absent: 0, leave: 0, tracked: 0 };
+  var body = months.map(function (m) {
+    var r = rangeOfMonths([m]);
+    if (r.from > st.d.today) return '<tr><td>' + thMonth(m, true) + '</td><td colspan="7" class="muted small r">ยังไม่ถึง</td></tr>';
+    var o = attStats(p, r.from, r.to);
+    for (var k in tot) tot[k] += o[k] || 0;
+    return '<tr><td>' + thMonth(m, true) + '</td>' + attCells(o) + '</tr>';
+  }).join('');
+  tot.onTime = tot.work ? (tot.present - tot.late) / tot.work : null;
+  var ev = (st.d.eventAtt || []).filter(function (r) { return r.personId === p.personId && fyOf(String(r.inAt).slice(0, 10)) === fy; }).length;
+  $('#pAttSub').textContent = 'จากการสแกนรหัส QR · เริ่มนับ ' + thDate(clockStart()) + ' · ลงชื่อเข้าร่วมประชุม/อบรม ' + ev + ' ครั้งในปีงบประมาณนี้';
+  $('#pAttendance').innerHTML = '<table class="tbl"><thead><tr><th>เดือน</th>' + attHead() + '</tr></thead><tbody>' + body + '</tbody><tfoot><tr><td>' + fyLabel(fy) + '</td>' + attCells(tot) + '</tr></tfoot></table>';
+}
+
+// ================================================================== รายงาน: รายบุคคล + การลงเวลา
+function renderReportPersonPicker() {
+  var box = $('#reportPersonBox'); if (!box) return;
+  if (st.role === 'MEMBER') { box.innerHTML = ''; box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  var ppl = filteredPeople({ team: '', div: '' }).slice().sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  box.innerHTML = '<div class="field" style="min-width:300px;flex:1"><label>รายงาน</label><select class="inp" id="rpPerson"><option value="">รายงานรวม (ตามทีม / งานการพยาบาลที่เลือก)</option>' +
+    ppl.map(function (p) { return '<option value="' + p.personId + '"' + (st.reportPerson === p.personId ? ' selected' : '') + '>รายบุคคล: ' + esc(p.fullName) + '</option>'; }).join('') + '</select></div>';
+}
+document.addEventListener('change', function (e) { if (e.target.id === 'rpPerson') { st.reportPerson = e.target.value; RENDER.report(); } });
+function reportAttendanceHtml(people, r) {
+  if (clockStart() > r.to) return '';
+  var rows = people.map(function (p) { return { p: p, o: attStats(p, r.from, r.to) }; }).filter(function (x) { return x.o.tracked || x.o.present; });
+  if (!rows.length) return '';
+  var mid = seeLate() ? '<th class="r">มาหลังเวลาที่กำหนด</th><th class="r">มาหลังเวลา (นาที)</th><th class="r">กลับก่อนเวลา</th>'
+                      : '<th class="r">เวลามาปฏิบัติงาน</th><th class="r">เวลากลับ</th><th class="r">ประชุม</th>';
+  return '<h3 style="margin:28px 0 8px">สรุปการปฏิบัติงาน (นับตั้งแต่ ' + thDate(clockStart() > r.from ? clockStart() : r.from) + ')</h3>' +
+    '<table class="tight">' + colg([4, 26, 9, 7, 9, 9, 9, 9, 9, 9]) +
+    '<thead><tr><th>#</th><th>ชื่อ-สกุล</th><th class="r">วันทำงาน</th><th class="r">มาปฏิบัติงาน</th>' + mid + '<th class="r">ไม่ได้ลงเวลากลับ</th><th class="r">ไม่พบการลงเวลา</th><th class="r">ชม.ปฏิบัติงาน</th><th class="r">' + (seeLate() ? 'ตรงเวลา' : 'อัตราการมา') + '</th></tr></thead><tbody>' +
+    rows.map(function (x, i) {
+      var o = x.o;
+      var c = seeLate() ? '<td class="r">' + (o.late || '–') + '</td><td class="r">' + (o.lateMin || '–') + '</td><td class="r">' + (o.early || '–') + '</td>'
+                        : '<td class="r">' + (o.inAvg || '–') + '</td><td class="r">' + (o.outAvg || '–') + '</td><td class="r">' + hrs(o.meetMin) + '</td>';
+      var last = seeLate() ? o.onTime : o.rate;
+      return '<tr><td class="nw">' + (i + 1) + '</td><td>' + esc(x.p.fullName) + '</td><td class="r nw">' + o.work + '</td><td class="r nw">' + o.present + '</td>' + c +
+        '<td class="r nw">' + (o.noOut || '–') + '</td><td class="r nw">' + (o.absent || '–') + '</td><td class="r nw">' + hrs(o.workMin) + '</td>' +
+        '<td class="r nw">' + (last == null ? '–' : Math.round(last * 100) + '%') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+function attendanceSheetRows(people, r) {
+  var head = ['ชื่อ-สกุล', 'SAP', 'ทีม', 'หอผู้ป่วย', 'วันทำงาน', 'มาปฏิบัติงาน'];
+  head = head.concat(seeLate() ? ['มาหลังเวลา (ครั้ง)', 'มาหลังเวลา (นาที)', 'กลับก่อนเวลา (ครั้ง)', 'กลับก่อนเวลา (นาที)'] : ['เวลาเข้างานเฉลี่ย', 'เวลากลับเฉลี่ย']);
+  head = head.concat(['ไม่ได้ลงเวลากลับ', 'ไม่พบการลงเวลา', 'วันลาเต็มวัน', 'เวลาปฏิบัติงาน (ชม.)', 'ประชุมภายใน (ชม.)', 'นอกเวลาราชการ (ชม.)', 'อัตราการเข้าร่วม %']);
+  var out = [head];
+  people.forEach(function (p) {
+    var o = attStats(p, r.from, r.to);
+    var row = [p.fullName, p.sap, TEAM_L[p.team], p.ward, o.work, o.present];
+    row = row.concat(seeLate() ? [o.late, o.lateMin, o.early, o.earlyMin] : [o.inAvg, o.outAvg]);
+    row = row.concat([o.noOut, o.absent, o.leave, +(o.workMin / 60).toFixed(2), +(o.meetMin / 60).toFixed(2),
+                      +(o.otMin / 60).toFixed(2), o.rate == null ? '' : Math.round(o.rate * 1000) / 10]);
+    out.push(row);
+  });
+  out.push([]); out.push(['รายวัน']);
+  out.push(seeLate() ? ['วันที่', 'ชื่อ-สกุล', 'เข้า', 'ออก', 'มาหลังเวลา (นาที)', 'กลับก่อนเวลา (นาที)', 'วิธี', 'หมายเหตุ']
+                     : ['วันที่', 'ชื่อ-สกุล', 'เวลาเข้างาน', 'เวลากลับ', 'วิธี', 'หมายเหตุ']);
+  var ids = {}; people.forEach(function (p) { ids[p.personId] = p; });
+  (st.d.attendance || []).filter(function (a) { return ids[a.personId] && a.date >= r.from && a.date <= r.to; }).sort(function (a, b) { return a.date < b.date ? -1 : 1; })
+    .forEach(function (a) {
+      out.push(seeLate() ? [a.date, ids[a.personId].fullName, hmOf(a.inAt), hmOf(a.outAt), Number(a.lateMin) || 0, Number(a.earlyMin) || 0, a.inMethod, a.note]
+                         : [a.date, ids[a.personId].fullName, hmOf(a.inAt), hmOf(a.outAt), a.inMethod, a.note]);
+    });
+  return out;
+}
+/** รายชื่อคนที่เข้าร่วมประชุมในช่วง r — ใช้ meetCounts() เงื่อนไขเดียวกับยอดรวมทั้งหน้าอื่น ๆ (ภายในต้องรับรองแล้ว) */
+function personMeetingRows(pid, r) {
+  var rows = [];
+  (st.d.eventAtt || []).forEach(function (e) {
+    if (e.personId !== pid) return;
+    var m = IX.meetById[e.meetingId]; if (!m || !meetCounts(m)) return;
+    var d = m.date || String(e.inAt || '').slice(0, 10);
+    if (d < r.from || d > r.to) return;
+    rows.push({ m: m, e: e, d: d });
+  });
+  rows.sort(function (a, b) { return a.d < b.d ? -1 : a.d > b.d ? 1 : 0; });
+  return rows;
+}
+function reportPersonHtml(pid, r) {
+  var p = IX.people[pid], a = aggregate([p], r.from, r.to), o = a.by[pid] || { byType: {}, ded: 0, cap: 0, pct: null };
+  var used = IX.typeOrder.filter(function (c) { return o.byType[c]; });
+  var ov = attStats(p, r.from, r.to);
+  var allRecs = (IX.recByP[pid] || []).filter(function (x) { return x.date >= r.from && x.date <= r.to; });
+  var recs = allRecs.filter(function (x) { return !isOffDuty(x.type); });
+  var offRecs = allRecs.filter(function (x) { return isOffDuty(x.type); });
+  var meetRows = personMeetingRows(pid, r);
+  var html = '<h2>รายงานรายบุคคล · ' + esc(p.fullName) + '</h2><div class="meta">' + esc([p.sap ? 'SAP ' + p.sap : '', p.position, p.ward, p.division, 'Team ' + (TEAM_L[p.team] || '')].filter(Boolean).join(' · ')) +
+    '<br>' + esc(r.label) + ' · ลาเต็มวัน = ' + HPD() + ' ชม. · ออกรายงาน ' + thDate(st.d.today) + '</div>';
+
+  // ---------------------------------------------------------------- สรุปเร็ว (stat-strip)
+  html += '<div class="stat-strip">' +
+    '<div class="stat-chip' + (o.pct != null && o.pct < target() ? ' warn' : '') + '"><div class="lbl">% เวลาโครงการ</div><div class="val">' + pctTxt(o.pct) + '</div></div>' +
+    '<div class="stat-chip"><div class="lbl">เวลาปฏิบัติงานรวม</div><div class="val">' + hrs(ov.workMin, false) + '<small> ชม.</small></div></div>' +
+    '<div class="stat-chip"><div class="lbl">มาปฏิบัติงาน</div><div class="val">' + ov.present + '<small> / ' + ov.work + ' วัน</small></div></div>' +
+    '<div class="stat-chip"><div class="lbl">รายการลา</div><div class="val">' + recs.length + '<small> รายการ</small></div></div>' +
+    '<div class="stat-chip"><div class="lbl">ประชุมภายในโครงการ</div><div class="val">' + meetRows.length + '<small> ครั้ง</small></div></div>' +
+    '</div>';
+
+  html += '<table class="tight">' + colg([15].concat(used.map(function () { return 9; }), [11, 12])) +
+    '<thead><tr><th>เดือน</th>' + used.map(function (c) { return '<th class="r">' + esc(shortHead(c)) + '</th>'; }).join('') + '<th class="r">รวมหัก</th><th class="r">% โครงการ</th></tr></thead><tbody>' +
+    r.months.map(function (m) { var rr = rangeOfMonths([m]), x = aggregate([p], rr.from, rr.to).by[pid];
+      return '<tr><td>' + thMonth(m, true) + '</td>' + used.map(function (c) { return '<td class="r">' + hrs(x && x.byType[c]) + '</td>'; }).join('') + '<td class="r">' + hrs(x && x.ded) + '</td><td class="r">' + pctTxt(x ? x.pct : null) + '</td></tr>'; }).join('') +
+    '</tbody><tfoot><tr><td><b>รวม</b></td>' + used.map(function (c) { return '<td class="r"><b>' + hrs(o.byType[c]) + '</b></td>'; }).join('') + '<td class="r"><b>' + hrs(o.ded) + '</b></td><td class="r"><b>' + pctTxt(o.pct) + '</b></td></tr></tfoot></table>' + typeLegend(used);
+
+  if (clockStart() <= r.to) {
+    var mh = seeLate() ? '<th class="r">มาหลังเวลาที่กำหนด (ครั้ง/น.)</th><th class="r">กลับก่อนเวลา</th>' : '<th class="r">เวลามาปฏิบัติงาน</th><th class="r">เวลากลับ</th>';
+    html += '<h3>การปฏิบัติงาน (รายเดือน)</h3><table class="tight">' + colg([15, 10, 7, 11, 10, 10, 10, 9, 9, 9]) +
+      '<thead><tr><th>เดือน</th><th class="r">วันทำงาน</th><th class="r">มาปฏิบัติงาน</th>' + mh +
+      '<th class="r">ไม่ได้ลงเวลากลับ</th><th class="r">ไม่พบการลงเวลา</th><th class="r">ชม.ปฏิบัติงาน</th><th class="r">ประชุม</th><th class="r">ปฏิบัติงานนอกเวลา</th></tr></thead><tbody>' +
+      r.months.map(function (m) {
+        var rr = rangeOfMonths([m]); if (rr.from > st.d.today) return '';
+        var x = attStats(p, rr.from, rr.to);
+        if (!(x.tracked || x.present || x.workMin)) return '<tr><td>' + thMonth(m, true) + '</td><td colspan="9" class="r" style="color:#64748b">ยังไม่ใช้ระบบ</td></tr>';
+        var c = seeLate() ? '<td class="r">' + (x.late ? x.late + ' / ' + x.lateMin : '–') + '</td><td class="r">' + (x.early || '–') + '</td>'
+                          : '<td class="r">' + (x.inAvg || '–') + '</td><td class="r">' + (x.outAvg || '–') + '</td>';
+        return '<tr><td class="nw">' + thMonth(m, true) + '</td><td class="r nw">' + x.work + '</td><td class="r nw">' + x.present + '</td>' + c +
+          '<td class="r nw">' + (x.noOut || '–') + '</td><td class="r nw">' + (x.absent || '–') + '</td>' +
+          '<td class="r nw">' + hrs(x.workMin) + '</td><td class="r nw">' + hrs(x.meetMin) + '</td><td class="r nw">' + hrs(x.otMin) + '</td></tr>';
+      }).join('') + '</tbody></table>';
+
+    // ---------------------------------------------------------------- การลงเวลารายวัน (เข้า/ออก)
+    var attRows = (st.d.attendance || []).filter(function (x) { return x.personId === pid && x.date >= r.from && x.date <= r.to; })
+      .sort(function (x, y) { return x.date < y.date ? -1 : x.date > y.date ? 1 : 0; });
+    html += '<h3>การลงเวลารายวัน <span class="cnt">(' + attRows.length + ' วัน)</span></h3>' + (attRows.length ?
+      '<table class="tight">' + colg([4, 11, 14, 11, 10, 16, 34]) +
+      '<thead><tr><th>#</th><th>วันที่</th><th class="r">เวลามาปฏิบัติงาน</th><th class="r">เวลากลับ</th><th class="r">ชม.</th><th>วิธีบันทึก</th><th>หมายเหตุ</th></tr></thead><tbody>' +
+      attRows.map(function (x, i) {
+        var inT = hmOf(x.inAt), outT = hmOf(x.outAt);
+        var lateTag = seeLate() && Number(x.lateMin) > 0 ? ' <span class="flag REVIEW">มาหลังเวลาที่กำหนด ' + x.lateMin + ' น.</span>' : '';
+        var dm = inT && outT && toM(outT) > toM(inT) ? toM(outT) - toM(inT) : 0;
+        return '<tr><td class="nw">' + (i + 1) + '</td><td class="nw">' + thDate(x.date) + '</td><td class="r nw">' + (inT || '–') + lateTag + '</td><td class="r nw">' + (outT || '<span class="muted">ยังไม่ได้ลงเวลากลับ</span>') + '</td>' +
+          '<td class="r nw">' + (dm ? minToHm(dm) : '–') + '</td><td>' + esc(METHOD_L[String(x.inMethod || '').toUpperCase()] || x.inMethod || '') + '</td><td>' + esc(x.note || '') + '</td></tr>';
+      }).join('') + '</tbody></table>' : '<p style="color:#64748b">ไม่มีข้อมูลการลงเวลาในช่วงนี้</p>');
+  }
+
+  // ---------------------------------------------------------------- รายการลา / ใช้ชั่วโมง (+ วันที่ยื่น)
+  var leaveIx = leaveReqIndex();
+  var lvRows = leaveRowsSort(recs.map(function (x) { return { p: p, x: x, q: leaveIx[x.recordId] }; }));
+  html += '<h3>รายการลา / ใช้ชั่วโมง <span class="cnt">(' + recs.length + ' รายการ)</span></h3>' + (recs.length ? leaveDetailTable(lvRows, { one: true }) : '<p style="color:#64748b">ไม่มีรายการ</p>');
+  if (offRecs.length) {
+    html += '<h3>หยุดตามเวร <span class="cnt">(' + offRecs.length + ' วัน) — ไม่ใช่การลา ไม่หักเวลาโครงการ</span></h3><table class="tight">' + colg([4, 11, 85]) +
+      '<thead><tr><th>#</th><th>วันที่</th><th>ประเภท</th></tr></thead><tbody>' +
+      offRecs.map(function (x, i) { return '<tr><td class="nw">' + (i + 1) + '</td><td class="nw">' + thDate(x.date) + '</td><td>' + tag(x.type) + '</td></tr>'; }).join('') + '</tbody></table>';
+  }
+
+  // ---------------------------------------------------------------- การประชุมภายในโครงการ (รายวัน)
+  html += '<h3>การประชุมภายในโครงการ <span class="cnt">(' + meetRows.length + ' ครั้ง)</span></h3>' + (meetRows.length ?
+    '<table class="tight">' + colg([4, 11, 49, 14, 11, 11]) +
+    '<thead><tr><th>#</th><th>วันที่</th><th>หัวข้อ</th><th>เวลา</th><th class="r">เวลามา</th><th class="r">เวลากลับ</th></tr></thead><tbody>' +
+    meetRows.map(function (x, i) {
+      return '<tr><td class="nw">' + (i + 1) + '</td><td class="nw">' + thDate(x.d) + '</td><td>' + esc(x.m.topic || '') + '</td>' +
+        '<td class="nw">' + (x.m.startTime ? x.m.startTime + '–' + (x.m.endTime || '') : '–') + '</td>' +
+        '<td class="r nw">' + (hmOf(x.e.inAt) || '–') + '</td><td class="r nw">' + (hmOf(x.e.outAt) || '–') + '</td></tr>';
+    }).join('') + '</tbody></table>' : '<p style="color:#64748b">ไม่มีการประชุมในช่วงนี้</p>');
+
+  return html + reportSign();
+}
+
+// ================================================================== ประชุม: เวลาเริ่ม + จำนวนผู้ลงชื่อเข้าร่วม
+function meetingAttendanceModal(m) {
+  var ea = (IX.eaByMeet && IX.eaByMeet[m.meetingId]) || [];
+  openModal('<h3>ลงชื่อเข้าร่วม · ' + esc(String(m.topic).slice(0, 80)) + '</h3><p class="muted small">' + thDate(m.date) + (m.startTime ? ' · ' + m.startTime + '–' + (m.endTime || '') + ' น.' : '') + ' · ' + ea.length + ' คน</p>' +
+    (ea.length ? '<div class="tbl-wrap" style="max-height:50vh;overflow:auto"><table class="tbl"><thead><tr><th>ชื่อ</th><th>เวลามา</th><th>เวลากลับ</th><th>วิธี</th></tr></thead><tbody>' + ea.map(function (r) {
+      var p = IX.people[r.personId] || {}; return '<tr><td>' + esc(p.fullName || r.personId) + '</td><td class="num">' + hmOf(r.inAt) + (seeLate() && Number(r.lateMin) ? ' <span class="t-warn small">มาหลังเวลาที่กำหนด ' + r.lateMin + '</span>' : '') + '</td><td class="num">' + (hmOf(r.outAt) || '–') + '</td><td class="small">' + esc(r.method) + '</td></tr>';
+    }).join('') + '</tbody></table></div>' : '<div class="empty">ยังไม่มีผู้ลงชื่อเข้าร่วม</div>') +
+    '<div class="actions"><button class="btn" data-close>ปิด</button><button class="btn primary" id="maStation">เปิดจุดลงเวลาของประชุมนี้</button></div>');
+  $('#maStation').onclick = function () { SC.mode = 'EVENT'; SC.meetingId = m.meetingId; store('px_st_mode', 'EVENT'); store('px_st_meet', m.meetingId); closeModal(); go('station'); };
+}
+
+// ================================================================== เริ่มทำงาน
+st.role = '';
+st.token = store('px_tok') || '';
+bootRoute(function () { load(false); });
+
+/**
+ * เส้นทางจากลิงก์ที่เปิดหน้าเว็บ (?p=scan&c=… หรือ ?p=ci&w=…)
+ *   ใน Apps Script: doGet ฝัง ROUTE มาให้แล้ว
+ *   บน GitHub Pages: ROUTE = null → อ่านจาก URL เอง · QR หน้าห้องส่งไปตรวจที่ apiRoomRoute (16_Http.gs)
+ *   แล้วลบ ?… ออกจากแถบที่อยู่ เพื่อไม่ให้กดรีเฟรชแล้วใช้ QR เดิมซ้ำ
+ */
+function bootRoute(next) {
+  if (typeof ROUTE !== 'undefined' && ROUTE) return next();
+  var q = {};
+  try { new URLSearchParams(location.search).forEach(function (v, k) { q[k] = v; }); } catch (e) { /* - */ }
+  var p = String(q.p || '').slice(0, 20);
+  function done() {
+    try { if (location.search) history.replaceState(null, '', location.pathname + location.hash); } catch (e) { /* - */ }
+    next();
+  }
+  if (p === 'ci') {
+    ROUTE = { p: 'ci', pending: true };
+    call('apiRoomRoute', { w: q.w, t: q.t, n: q.n, s: q.s })
+      .then(function (r) { ROUTE = r || { p: 'ci', err: 'ตรวจ QR ไม่สำเร็จ', code: 'ERR' }; })
+      .catch(function (e) { ROUTE = { p: 'ci', err: e && e.message || String(e), code: e && e.code || 'ERR' }; })
+      .then(done);
+    return;
+  }
+  ROUTE = { p: p, c: String(q.c || '').slice(0, 200) };
+  done();
+}
+
+// ================================================================ หน้า "สรุป" ของผู้ปฏิบัติงานโครงการ: แท็บย่อย
+// ภาพรวม (ของเดิม) · ประวัติการลา (ดูอย่างเดียว) · รายงานของฉัน (รูปแบบเดียวกับรายงานรายบุคคลของฝ่ายเลขานุการโครงการ)
+var MY = { tab: 'ov', lvType: '', rq: 'fy', from: '', to: '' };
+function myIsMember() { return st.role === 'MEMBER'; }
+function myFyRange() { var fy = st.pFy || fyOf(st.d.today), r = rangeOfMonths(fyMonths(fy)); r.fy = fy; r.label = fyLabel(fy); return r; }
+function mySync() {
+  var on = myIsMember() && !!IX.people[st.personId];
+  $('#pTabsWrap').classList.toggle('hide', !on);
+  var tab = on ? MY.tab : 'ov';
+  $$('#pTabs [data-pt]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-pt') === tab); });
+  $('#pTabOverview').classList.toggle('hide', tab !== 'ov');
+  $('#pTabLeave').classList.toggle('hide', tab !== 'lv');
+  $('#pTabRep').classList.toggle('hide', tab !== 'rep');
+  if (tab === 'lv') myLeaveRender();
+  if (tab === 'rep') myRepRender();
+}
+(function () {
+  var base = RENDER.person;
+  RENDER.person = function () { base.apply(this, arguments); mySync(); };
+})();
+$('#pTabs').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-pt]'); if (!b) return;
+  MY.tab = b.getAttribute('data-pt'); mySync();
+});
+
+// ---------------------------------------------------------------- ประวัติการลา
+function myLeaveRender() {
+  var p = IX.people[st.personId]; if (!p) return;
+  var r = myFyRange(), ix = leaveReqIndex();
+  var recs = (IX.recByP[p.personId] || []).filter(function (x) { return x.date >= r.from && x.date <= r.to; });
+  var byType = {}, total = 0, nLeave = 0;
+  recs.forEach(function (x) {
+    var m = recMin(x);
+    var o = byType[x.type] || (byType[x.type] = { n: 0, min: 0 });
+    o.n++; o.min += m;
+    if (isLeave(x.type)) { total += m; nLeave++; }      // ยอดรวมนับเฉพาะประเภทที่เป็นการลา ให้ตรงกับการ์ดในแท็บภาพรวม
+  });
+  var used = IX.typeOrder.filter(function (k) { return byType[k]; });
+  $('#myLvKpis').innerHTML =
+    '<div class="card kpi"><div class="lbl"><span class="dot" style="background:var(--primary)"></span>ลารวมทั้งหมด</div><div class="val num">' + hrs(total, false) + '<small>ชม.</small></div><div class="foot">' + nLeave + ' รายการ · ≈ ' + (Math.round(total / (HPD() * 60) * 10) / 10) + ' วัน</div></div>' +
+    used.map(function (k) {
+      var o = byType[k];
+      return '<div class="card kpi"><div class="lbl"><span class="dot" style="background:' + esc(tcolor(k)) + '"></span>' + esc(tlabel(k)) + '</div>' +
+        '<div class="val num">' + (isOffDuty(k) ? o.n + '<small> วัน</small>' : hrs(o.min, false) + '<small>ชม.</small>') + '</div><div class="foot">' + o.n + ' รายการ' + (isOffDuty(k) ? ' · ไม่ใช่การลา' : '') + '</div></div>';
+    }).join('');
+  var sel = $('#myLvType');
+  if (MY.lvType && !byType[MY.lvType]) MY.lvType = '';
+  sel.innerHTML = '<option value="">ทุกประเภท</option>' + used.map(function (k) {
+    return '<option value="' + esc(k) + '"' + (MY.lvType === k ? ' selected' : '') + '>' + esc(tlabel(k)) + '</option>'; }).join('');
+  var rows = leaveRowsSort(recs.filter(function (x) { return !MY.lvType || x.type === MY.lvType; })
+    .map(function (x) { return { p: p, x: x, q: ix[x.recordId] }; })).reverse();   // ใหม่ → เก่า
+  $('#myLvSub').textContent = r.label + ' · ' + rows.length + ' รายการ · เรียงจากวันที่ลาล่าสุด';
+  $('#myLvList').innerHTML = rows.length ? '<div class="my-lv-list">' + rows.map(function (o) {
+    var x = o.x;
+    var time = x.fullDay === 'Y' ? 'เต็มวัน' : (x.startTime ? x.startTime + '–' + x.endTime + ' น.' : hm(+x.minutes || 0));
+    var lead = o.lead == null ? '' : (o.lead < 0 ? '<span class="t-bad">ยื่นย้อนหลัง ' + (-o.lead) + ' วัน</span>' : 'ยื่นล่วงหน้า ' + o.lead + ' วัน');
+    return '<div class="my-lv-item">' +
+      '<div class="my-lv-top"><b>' + thDate(x.date) + '</b> <span class="muted small">' + TH_WD[wd(x.date)] + '</span>' +
+        '<span class="my-lv-hrs num">' + hrs(recMin(x), false) + ' ชม.</span></div>' +
+      '<div class="my-lv-mid">' + tag(x.type) + ' <span class="small">' + esc(time) + '</span></div>' +
+      '<div class="my-lv-meta muted small">' + [o.sub ? 'ยื่นเมื่อ ' + thDate(o.sub) : '', lead, x.checkedBy || (o.q && o.q.decidedBy) ? 'ผู้รับรอง ' + esc(x.checkedBy || o.q.decidedBy) : ''].filter(Boolean).join(' · ') + '</div>' +
+      (x.reason ? '<div class="my-lv-reason small">' + esc(x.reason) + '</div>' : '') +
+    '</div>';
+  }).join('') + '</div>' : '<div class="empty">ไม่มีรายการลาใน' + esc(r.label) + '</div>';
+}
+$('#myLvType').addEventListener('change', function (e) { MY.lvType = e.target.value; myLeaveRender(); });
+
+// ---------------------------------------------------------------- รายงานของฉัน
+function myRepRange() {
+  var t = st.d.today, k = MY.rq, r;
+  if (k === 'month') { r = rangeOfMonths([ym(t)]); r.label = thMonth(ym(t), true); }
+  else if (k === 'prev') {
+    var y = +t.slice(0, 4), m = +t.slice(5, 7) - 1; if (m < 1) { m = 12; y--; }
+    var pm = y + '-' + pad(m); r = rangeOfMonths([pm]); r.label = thMonth(pm, true);
+  } else if (k === 'quarter') {
+    var fy = fyOf(t), q = qOf(t), ms = fyMonths(fy).slice((q - 1) * 3, q * 3);
+    r = rangeOfMonths(ms); r.label = 'ไตรมาส ' + q + ' ' + fyLabel(fy) + ' (' + thMonth(ms[0]) + ' – ' + thMonth(ms[2]) + ')';
+  } else if (k === 'custom') {
+    var f = MY.from || ym(t) + '-01', to = MY.to || t;
+    if (to < f) { var z = f; f = to; to = z; }
+    var months = [], cur = ym(f);
+    while (cur <= ym(to)) { months.push(cur); var yy = +cur.slice(0, 4), mm = +cur.slice(5, 7) + 1; if (mm > 12) { mm = 1; yy++; } cur = yy + '-' + pad(mm); }
+    r = { from: f, to: to, months: months, label: thDate(f) + ' – ' + thDate(to) };
+  } else { r = myFyRange(); r.label = fyLabel(r.fy) + ' (' + thMonth(r.months[0]) + ' – ' + thMonth(r.months[11]) + ')'; }
+  return r;
+}
+function myRepRender() {
+  var p = IX.people[st.personId]; if (!p) return;
+  $$('#myRepQuick [data-mq]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-mq') === MY.rq); });
+  $('#myRepCustom').classList.toggle('hide', MY.rq !== 'custom');
+  var r = myRepRange();
+  if (MY.rq === 'custom') { $('#myRepFrom').value = r.from; $('#myRepTo').value = r.to; $('#myRepFrom').max = $('#myRepTo').max = st.d.today; }
+  $('#myRepSub').textContent = r.label + (MY.rq === 'fy' ? ' · เปลี่ยนปีงบประมาณได้ที่ช่องด้านบน' : '');
+  $('#myRepDoc').innerHTML = formalReport(reportPersonHtml(p.personId, r));
+}
+$('#myRepQuick').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-mq]'); if (!b) return;
+  MY.rq = b.getAttribute('data-mq'); myRepRender();
+});
+['#myRepFrom', '#myRepTo'].forEach(function (id) {
+  $(id).addEventListener('change', function () { MY.from = $('#myRepFrom').value; MY.to = $('#myRepTo').value; myRepRender(); });
+});
+$('#myRepPdf').addEventListener('click', function () {
+  myRepRender();
+  var pg = $('#page-person'); pg.classList.add('print-on');
+  setTimeout(function () { window.print(); pg.classList.remove('print-on'); }, 50);
+});
+</script>

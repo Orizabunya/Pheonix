@@ -1,0 +1,600 @@
+<script>
+'use strict';
+/* Phoenix Workspace — AttReport
+ * แท็บใหม่ใต้หน้า "ลงเวลา" (เฉพาะฝ่ายเลขานุการโครงการ):
+ *   log  = บันทึกการลงเวลารายวัน (ย้อนหลังได้ทั้งหมด · คลิกแถวเพื่อแก้เวลา)
+ *   gps  = ตำแหน่ง GPS (แผนที่ OpenStreetMap + ลิงก์ Google Maps)
+ *   rep  = ออกรายงาน (เลือกหัวข้อ · ดูตัวอย่าง · PDF / Excel)
+ * ใช้ตัวช่วยเดิมจาก App.html / Portal.html ทั้งหมด (dayStatus, attStats, leaveDetailTable, reportSign …)
+ * ข้อมูลที่เก่ากว่า 400 วัน (bootstrap ไม่ได้ส่งมา) ดึงเพิ่มจาก apiAttendanceRange ใน 14_AttReport.gs
+ */
+var AR = {
+  from: '', to: '', team: '', div: '', pid: '', q: '',
+  chip: '', geoSt: '', sort: 'desc', limit: 300, gLimit: 300,
+  loadedFrom: '', loading: false, built: false,
+  map: null, layer: null, refLayer: null, markers: {}, ref: null, refTried: false
+};
+var AR_LIMIT_STEP = 300;
+var AR_GEO_COL = { OK: '#16a34a', FUZZY: '#eda100', FAR: '#d03b3b', NONE: '#94a3b8', OFF: '#94a3b8' };
+var AR_SECS = [
+  ['person', 'สรุปรายคน', 'วันทำงาน · มาปฏิบัติงาน · มาหลังเวลาที่กำหนด · ไม่ได้ลงเวลากลับ · ไม่พบการลงเวลา · ลา · ชม.ปฏิบัติงาน · ตรงเวลา'],
+  ['month', 'สรุปรายเดือน', 'ยอดรวมของทุกคนที่เลือก แยกทีละเดือน'],
+  ['daily', 'บันทึกการลงเวลารายวัน', 'วันที่ · เข้า · ออก · ชม. · วิธีลงเวลา · สถานะ · หมายเหตุ'],
+  ['gps', 'บันทึกตำแหน่ง GPS', 'ผลตรวจพิกัดตอนเข้า/ออก · ระยะห่าง · ความคลาดเคลื่อน · ใช้อุปกรณ์ซ้ำกับผู้อื่น'],
+  ['leave', 'รายการลา', 'วันที่ลา · วันที่ยื่น · ล่วงหน้า · ประเภท · ชม. · เหตุผล · ผู้รับรอง'],
+  ['leaveSum', 'สรุปชั่วโมงลาแยกประเภท', 'ชั่วโมงลารวมของแต่ละคน แยกตามประเภทการลา']
+];
+var AR_QUICK = [['today', 'วันนี้'], ['month', 'เดือนนี้'], ['prev', 'เดือนก่อน'], ['quarter', 'ไตรมาสนี้'], ['fy', 'ปีงบประมาณนี้'], ['all', 'ทั้งหมด']];
+var AR_CHIPS = [['', 'ทั้งหมด'], ['IN', 'มาปฏิบัติงาน'], ['LATE', 'มาหลังเวลาที่กำหนด'], ['NOOUT', 'ไม่ได้ลงเวลากลับ'], ['ABSENT', 'ไม่พบการลงเวลา'], ['LEAVE', 'ลา']];
+var AR_GEO_CHIPS = [['', 'ทั้งหมด'], ['OK', 'อยู่ในพื้นที่ที่กำหนด'], ['FUZZY', 'ตำแหน่งไม่แน่ชัด'], ['FAR', 'อยู่นอกพื้นที่ที่กำหนด'], ['NONE', 'ไม่พบข้อมูลตำแหน่ง']];
+
+// ------------------------------------------------------------------ ช่วงวันที่
+function arBootSince() { return addDays(st.d.today, -400); }   // ต้องตรงกับ apiBootstrap (04_Api.gs)
+function arFirst() {
+  var c = S('CLOCK_START') || S('PROJECT_START') || st.d.today;
+  (st.d.attendance || []).forEach(function (r) { if (r.date && r.date < c) c = r.date; });
+  return c;
+}
+function arQuickRange(k) {
+  var t = st.d.today, fy = fyOf(t);
+  if (k === 'today') return [t, t];
+  if (k === 'month') return [ym(t) + '-01', t];
+  if (k === 'prev') {
+    var y = +t.slice(0, 4), m = +t.slice(5, 7) - 1; if (m < 1) { m = 12; y--; }
+    var pr = rangeOfMonths([y + '-' + pad(m)]); return [pr.from, pr.to];
+  }
+  if (k === 'quarter') { var q = qOf(t), ms = fyMonths(fy).slice((q - 1) * 3, q * 3); return [ms[0] + '-01', t]; }
+  if (k === 'fy') return [fyMonths(fy)[0] + '-01', t];
+  return [arFirst(), t];
+}
+function arRangeLabel() {
+  return AR.from === AR.to ? TH_WD_FULL[wd(AR.from)] + ' ' + thDate(AR.from) : thDate(AR.from) + ' – ' + thDate(AR.to);
+}
+function arInit() {
+  if (AR.from) return;
+  var r = arQuickRange('month'); AR.from = r[0]; AR.to = r[1];
+  AR.loadedFrom = arBootSince();
+}
+/** ช่วงที่เลือกเก่ากว่าข้อมูลที่โหลดมากับหน้าเว็บ → ดึงส่วนที่ขาดจากเซิร์ฟเวอร์ แล้วรวมเข้า st.d.attendance */
+function arEnsureLoaded() {
+  if (AR.loading || AR.from >= AR.loadedFrom) return false;
+  AR.loading = true;
+  var from = AR.from, to = addDays(AR.loadedFrom, -1);
+  call('apiAttendanceRange', st.token, from, to).then(function (r) {
+    var have = {};
+    (st.d.attendance || []).forEach(function (x) { have[x.personId + '|' + x.date] = 1; });
+    (r.attendance || []).forEach(function (x) { if (!have[x.personId + '|' + x.date]) st.d.attendance.push(x); });
+    AR.loadedFrom = from; AR.loading = false;
+    buildAttIndex();
+    if (st.page === 'clock') RENDER.clock();
+  }).catch(function (e) { AR.loading = false; handleErr(e); arNote(''); });
+  return true;
+}
+function arNote(msg) { var n = $('#arNote'); if (n) n.innerHTML = msg; }
+
+// ------------------------------------------------------------------ แถบตัวกรองร่วม (สร้างครั้งเดียว ไม่สร้างใหม่ขณะพิมพ์)
+function arPeopleBase() { return filteredPeople({ team: AR.team, div: AR.div }); }
+function arPeople() {
+  var q = String(AR.q || '').toLowerCase();
+  return arPeopleBase().filter(function (p) {
+    if (AR.pid && p.personId !== AR.pid) return false;
+    return !q || (p.fullName + ' ' + (p.ward || '') + ' ' + (p.sap || '')).toLowerCase().indexOf(q) !== -1;
+  }).sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+}
+function arBuildBar() {
+  if (AR.built) return;
+  AR.built = true;
+  $('#arBar').innerHTML =
+    '<div class="filters ar-bar" style="margin-top:0">' +
+      '<div class="field"><label>ตั้งแต่</label><input class="inp" type="date" id="arFrom"></div>' +
+      '<div class="field"><label>ถึง</label><input class="inp" type="date" id="arTo"></div>' +
+      '<div class="field"><label>ช่วงลัด</label><div class="seg ar-quick" id="arQuick">' +
+        AR_QUICK.map(function (k) { return '<button type="button" data-arq="' + k[0] + '">' + k[1] + '</button>'; }).join('') + '</div></div>' +
+    '</div>' +
+    '<div class="filters ar-bar" style="margin-top:12px">' +
+      '<div class="field"><label>ทีม</label><select class="inp" id="arTeam"></select></div>' +
+      '<div class="field"><label>งานการพยาบาล</label><select class="inp" id="arDiv"></select></div>' +
+      '<div class="field" style="min-width:240px"><label>บุคคล</label><select class="inp" id="arPerson"></select></div>' +
+      '<div class="field" style="flex:1;min-width:180px"><label>ค้นหาชื่อ</label><input class="inp" id="arQ" placeholder="ชื่อ / หอผู้ป่วย / SAP"></div>' +
+    '</div>' +
+    '<div class="ar-note small muted" id="arNote"></div>';
+  $('#arFrom').addEventListener('change', function (e) { arSetRange(e.target.value || AR.from, AR.to); });
+  $('#arTo').addEventListener('change', function (e) { arSetRange(AR.from, e.target.value || AR.to); });
+  $('#arQuick').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-arq]'); if (!b) return;
+    var r = arQuickRange(b.getAttribute('data-arq')); arSetRange(r[0], r[1]);
+  });
+  $('#arTeam').addEventListener('change', function (e) { AR.team = e.target.value; AR.pid = ''; arRefresh(); });
+  $('#arDiv').addEventListener('change', function (e) { AR.div = e.target.value; AR.pid = ''; arRefresh(); });
+  $('#arPerson').addEventListener('change', function (e) { AR.pid = e.target.value; arRefresh(); });
+  $('#arQ').addEventListener('input', function (e) {
+    AR.q = e.target.value; clearTimeout(AR._qt); AR._qt = setTimeout(arRefresh, 250);
+  });
+}
+function arSetRange(a, b) {
+  var t = st.d.today;
+  if (a > t) a = t; if (b > t) b = t;
+  if (a > b) { var x = a; a = b; b = x; }
+  AR.from = a; AR.to = b; AR.limit = AR_LIMIT_STEP; AR.gLimit = AR_LIMIT_STEP;
+  arRefresh();
+}
+/** อัปเดตค่าในแถบตัวกรองโดยไม่สร้างใหม่ (ช่องค้นหาไม่เสียโฟกัส) */
+function arSyncBar() {
+  var t = st.d.today;
+  $('#arFrom').value = AR.from; $('#arFrom').max = t; $('#arFrom').min = arFirst() < arBootSince() ? arFirst() : '2000-01-01';
+  $('#arTo').value = AR.to; $('#arTo').max = t;
+  $$('#arQuick [data-arq]').forEach(function (b) {
+    var r = arQuickRange(b.getAttribute('data-arq'));
+    b.classList.toggle('on', r[0] === AR.from && r[1] === AR.to);
+  });
+  $('#arTeam').innerHTML = '<option value="">ทุกทีม</option>' + ['CLINICAL', 'PAS'].map(function (k) {
+    return '<option value="' + k + '"' + (AR.team === k ? ' selected' : '') + '>Team ' + TEAM_L[k] + '</option>'; }).join('');
+  $('#arDiv').innerHTML = '<option value="">ทั้งหมด</option>' + (IX.divisions || []).map(function (v) {
+    return '<option' + (AR.div === v ? ' selected' : '') + '>' + esc(v) + '</option>'; }).join('');
+  var base = arPeopleBase().slice().sort(function (a, b) { return a.fullName.localeCompare(b.fullName, 'th'); });
+  if (AR.pid && !base.some(function (p) { return p.personId === AR.pid; })) AR.pid = '';
+  $('#arPerson').innerHTML = '<option value="">ทุกคน (' + base.length + ')</option>' + base.map(function (p) {
+    return '<option value="' + p.personId + '"' + (AR.pid === p.personId ? ' selected' : '') + '>' + esc(p.fullName) + (p.ward ? ' · ' + esc(p.ward) : '') + '</option>'; }).join('');
+  if (document.activeElement !== $('#arQ')) $('#arQ').value = AR.q;
+}
+function arRefresh() { if (st.page === 'clock') RENDER.clock(); }
+/** เตรียมทุกแท็บ: แถบตัวกรอง + โหลดข้อมูลย้อนหลังถ้าจำเป็น · คืน false ถ้ากำลังโหลด */
+function arPrepare(title) {
+  arInit(); arBuildBar(); arSyncBar();
+  $('#clkTitle').textContent = title + ' · ' + arRangeLabel();
+  if (arEnsureLoaded() || AR.loading) {
+    arNote('⏳ กำลังโหลดข้อมูลการลงเวลาย้อนหลังตั้งแต่ ' + thDate(AR.from) + ' …');
+    return false;
+  }
+  arNote('ช่วงที่เลือก ' + (daysBetween(AR.from, AR.to) + 1) + ' วัน · ' + arRangeLabel() + ' · ข้อมูลเริ่มมีตั้งแต่ ' + thDate(arFirst()));
+  return true;
+}
+
+// ------------------------------------------------------------------ ข้อมูล
+function arDur(row) {
+  var a = row && hmOf(row.inAt), b = row && hmOf(row.outAt);
+  return a && b && toM(b) > toM(a) ? toM(b) - toM(a) : 0;
+}
+function arMethod(row) {
+  if (!row) return '';
+  var a = String(row.inMethod || '').toUpperCase(), b = String(row.outMethod || '').toUpperCase();
+  var la = METHOD_L[a] || a, lb = METHOD_L[b] || b;
+  return b && b !== a ? la + ' / ' + lb : la;
+}
+/** แถวรายวัน (คน × วัน) — รวมวันที่ไม่พบการลงเวลาและวันลาเต็มวันด้วย ไม่รวมวันหยุดที่ไม่มีการลงเวลา */
+function arDailyRows(from, to, people) {
+  var out = [], today = st.d.today;
+  for (var d = from; d <= to; d = addDays(d, 1)) {
+    people.forEach(function (p) {
+      var w = pWindow(p); if (d < w.s || d > w.e) return;
+      var x = dayStatus(p, d);
+      if (x.code === 'OFF' || x.code === 'NA') return;
+      if (x.code === 'WAIT' && d !== today) return;
+      var key = x.row ? (x.noOut ? 'NOOUT' : x.code) : x.code;
+      out.push({ d: d, p: p, x: x, row: x.row, key: key });
+    });
+  }
+  return out;
+}
+function arChipMatch(o, chip) {
+  if (!chip) return true;
+  if (chip === 'IN') return !!o.row;
+  if (chip === 'LATE') return o.x.code === 'LATE';
+  if (chip === 'NOOUT') return !!o.x.noOut;
+  return o.x.code === chip;
+}
+function arSortRows(rows) {
+  var s = AR.sort;
+  return rows.sort(function (a, b) {
+    if (s === 'name') return a.p.fullName.localeCompare(b.p.fullName, 'th') || (a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+    if (a.d !== b.d) return (a.d < b.d ? -1 : 1) * (s === 'asc' ? 1 : -1);
+    return a.p.fullName.localeCompare(b.p.fullName, 'th');
+  });
+}
+function arStatusHtml(o) {
+  var lb = DS_LABEL[o.x.code] || [o.x.code, 'na'];
+  var h = pill(lb[0], lb[1]);
+  if (o.x.code === 'LATE') h += ' <span class="t-warn small">' + o.row.lateMin + ' น.</span>';
+  if (o.x.noOut) h += ' ' + pill('ไม่ได้ลงเวลากลับ', 'warn');
+  return h;
+}
+function arStatusText(o) {
+  var lb = DS_LABEL[o.x.code] || [o.x.code];
+  return lb[0] + (o.x.code === 'LATE' ? ' ' + o.row.lateMin + ' น.' : '') + (o.x.noOut ? ' · ไม่ได้ลงเวลากลับ' : '');
+}
+function arNoteText(o) {
+  var parts = o.x.recs.map(function (r) {
+    return tlabel(r.type) + (r.fullDay === 'Y' ? '' : ' ' + (r.startTime ? r.startTime + '–' + r.endTime : hm(+r.minutes || 0)));
+  });
+  if (o.row && o.row.note) parts.push(o.row.note);
+  if (o.row && o.row.deviceNote) parts.push(o.row.deviceNote);
+  return parts.join(' · ');
+}
+function arNoteHtml(o) {
+  var h = o.x.recs.map(function (r) { return tag(r.type) + (r.fullDay === 'Y' ? '' : ' <span class="small">' + esc(r.startTime ? r.startTime + '–' + r.endTime : hm(+r.minutes || 0)) + '</span>'); }).join(' ');
+  if (o.row && o.row.note) h += ' <span class="muted small">' + esc(o.row.note) + '</span>';
+  if (o.row && o.row.deviceNote) h += ' <span class="t-bad small">' + esc(o.row.deviceNote) + '</span>';
+  return h;
+}
+/** "OK|35m|±12m|r150" → { st, dist, acc } */
+function arGeo(txt) {
+  var p = String(txt || '').split('|'), s = GEO_TH[p[0]] ? p[0] : '';
+  var num = function (v) { var n = parseFloat(String(v || '').replace(/[^\d.]/g, '')); return isFinite(n) ? n : ''; };
+  return { st: s, dist: num(p[1]), acc: num(p[2]), raw: String(txt || '') };
+}
+function arGeoRows(from, to, people) {
+  var ids = {}; people.forEach(function (p) { ids[p.personId] = p; });
+  var out = [];
+  (st.d.attendance || []).forEach(function (r) {
+    if (r.date < from || r.date > to || !ids[r.personId]) return;
+    var gi = arGeo(r.inGeo), go = arGeo(r.outGeo);
+    var has = function (g) { return g.st && g.st !== 'OFF'; };
+    if (!has(gi) && !has(go)) return;
+    out.push({ d: r.date, p: ids[r.personId], row: r, gi: gi, go: go, key: r.personId + '|' + r.date });
+  });
+  return out;
+}
+function arGeoMatch(o, s) { return !s || o.gi.st === s || o.go.st === s; }
+function arDistTxt(g) { return g.dist === '' ? '' : Math.round(g.dist) + ' ม.'; }
+function arAccTxt(g) { return g.acc === '' ? '' : '±' + Math.round(g.acc) + ' ม.'; }
+function arPair(a, b) { return a || b ? (a || '–') + ' / ' + (b || '–') : '–'; }
+
+// ------------------------------------------------------------------ แท็บ 1: บันทึกการลงเวลารายวัน
+RENDER.arLog = function () {
+  if (!arPrepare('บันทึกการลงเวลารายวัน')) { $('#arLogTable').innerHTML = '<div class="empty">กำลังโหลด…</div>'; $('#arLogChips').innerHTML = ''; return; }
+  var people = arPeople(), all = arDailyRows(AR.from, AR.to, people);
+  var cnt = {}; AR_CHIPS.forEach(function (c) { cnt[c[0]] = all.filter(function (o) { return arChipMatch(o, c[0]); }).length; });
+  $('#arLogChips').innerHTML = AR_CHIPS.map(function (c) {
+    return '<button type="button" class="ar-chip' + (AR.chip === c[0] ? ' on' : '') + '" data-archip="' + c[0] + '">' + c[1] + ' <b class="num">' + cnt[c[0]] + '</b></button>';
+  }).join('') +
+    '<span class="ar-sort"><label class="small muted">เรียง</label> <select class="inp sm" id="arSort">' +
+    [['desc', 'วันที่ใหม่ → เก่า'], ['asc', 'วันที่เก่า → ใหม่'], ['name', 'ชื่อ-สกุล']].map(function (o) {
+      return '<option value="' + o[0] + '"' + (AR.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></span>';
+  var rows = arSortRows(all.filter(function (o) { return arChipMatch(o, AR.chip); }));
+  var shown = rows.slice(0, AR.limit);
+  $('#arLogTable').innerHTML = rows.length ?
+    '<table class="tbl ar-log"><thead><tr><th>วันที่</th><th>ชื่อ-สกุล</th><th>หน่วยงาน</th><th class="r">เวลามา</th><th class="r">เวลากลับ</th><th class="r">ชม.ปฏิบัติงาน</th><th>วิธีลงเวลา</th><th>สถานะ</th><th>หมายเหตุ</th></tr></thead><tbody>' +
+    shown.map(function (o) {
+      var r = o.row, dm = arDur(r);
+      return '<tr class="click" data-arlog="' + o.p.personId + '|' + o.d + '" title="คลิกเพื่อแก้ไขหรือลงเวลาแทน">' +
+        '<td class="nw">' + thDate(o.d) + ' <span class="muted small">' + TH_WD[wd(o.d)] + '</span></td>' +
+        '<td><div class="nm">' + esc(o.p.fullName) + '</div></td><td class="small">' + esc(o.p.ward || o.p.division || '') + '</td>' +
+        '<td class="r num">' + (r ? hmOf(r.inAt) || '–' : '–') + '</td><td class="r num">' + (r && r.outAt ? hmOf(r.outAt) : '–') + '</td>' +
+        '<td class="r num">' + (dm ? minToHm(dm) : '–') + '</td>' +
+        '<td class="small">' + esc(arMethod(r)) + '</td><td class="nw">' + arStatusHtml(o) + '</td><td class="small">' + arNoteHtml(o) + '</td></tr>';
+    }).join('') + '</tbody></table>' +
+    (rows.length > shown.length ? '<div class="ar-more"><button class="btn" data-armore="log">แสดงเพิ่มอีก ' + Math.min(AR_LIMIT_STEP, rows.length - shown.length) + ' แถว</button> <span class="muted small">แสดง ' + shown.length + ' จาก ' + rows.length + ' แถว</span></div>' : '')
+    : '<div class="empty">ไม่มีรายการในช่วงที่เลือก</div>';
+};
+$('#arLogChips').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-archip]'); if (!b) return;
+  AR.chip = b.getAttribute('data-archip'); AR.limit = AR_LIMIT_STEP; RENDER.arLog();
+});
+$('#arLogChips').addEventListener('change', function (e) {
+  if (e.target.id === 'arSort') { AR.sort = e.target.value; RENDER.arLog(); }
+});
+$('#arLogTable').addEventListener('click', function (e) {
+  var m = e.target.closest('[data-armore]');
+  if (m) { AR.limit += AR_LIMIT_STEP; RENDER.arLog(); return; }
+  var tr = e.target.closest('[data-arlog]'); if (!tr) return;
+  var k = tr.getAttribute('data-arlog').split('|');
+  openClockModal(k[0], k[1], IX.att[k[0] + '|' + k[1]] || null);
+});
+
+// ------------------------------------------------------------------ แท็บ 2: ตำแหน่ง GPS
+function arGeoCell(time, g, lat, lng) {
+  if (!g.st || g.st === 'OFF') return '<span class="muted">–</span>';
+  var lb = GEO_TH[g.st];
+  var txt = '<span class="' + lb[1] + '">◉ ' + esc(lb[0]) + '</span>';
+  var link = hasLatLng_(lat, lng) ? ' <a class="geo-link" href="' + geoMapUrl_(lat, lng) + '" target="_blank" rel="noopener" title="เปิดตำแหน่งนี้ใน Google Maps">🗺️</a>' : '';
+  return '<b class="num">' + (time || '–') + '</b> ' + txt + link;
+}
+RENDER.arGps = function () {
+  if (!arPrepare('ตำแหน่ง GPS')) { $('#arGpsTable').innerHTML = '<div class="empty">กำลังโหลด…</div>'; $('#arGpsChips').innerHTML = ''; return; }
+  if (!AR.refTried) {
+    AR.refTried = true;
+    call('apiGeoRef', st.token).then(function (r) { AR.ref = r; if (st.page === 'clock' && st.clkTab === 'gps') RENDER.arGps(); }).catch(function () {});
+  }
+  var people = arPeople(), all = arGeoRows(AR.from, AR.to, people);
+  var cnt = {}; AR_GEO_CHIPS.forEach(function (c) { cnt[c[0]] = all.filter(function (o) { return arGeoMatch(o, c[0]); }).length; });
+  $('#arGpsChips').innerHTML = AR_GEO_CHIPS.map(function (c) {
+    var dot = c[0] ? '<i class="ar-dot" style="background:' + AR_GEO_COL[c[0]] + '"></i>' : '';
+    return '<button type="button" class="ar-chip' + (AR.geoSt === c[0] ? ' on' : '') + '" data-argeo="' + c[0] + '">' + dot + c[1] + ' <b class="num">' + cnt[c[0]] + '</b></button>';
+  }).join('');
+  var rows = all.filter(function (o) { return arGeoMatch(o, AR.geoSt); })
+    .sort(function (a, b) { return a.d !== b.d ? (a.d < b.d ? 1 : -1) : a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+  arMapDraw(rows);
+  var shown = rows.slice(0, AR.gLimit);
+  $('#arGpsTable').innerHTML = rows.length ?
+    '<table class="tbl ar-gps"><thead><tr><th>วันที่</th><th>ชื่อ-สกุล</th><th>เวลามา · ผลตรวจพิกัด</th><th>เวลากลับ · ผลตรวจพิกัด</th><th class="r">ระยะห่าง (มา / กลับ)</th><th class="r">ความคลาดเคลื่อน</th><th>ใช้อุปกรณ์ซ้ำกับผู้อื่น</th></tr></thead><tbody>' +
+    shown.map(function (o) {
+      var r = o.row, pin = hasLatLng_(r.inLat, r.inLng) || hasLatLng_(r.outLat, r.outLng);
+      return '<tr' + (pin ? ' class="click" data-argps="' + esc(o.key) + '" title="คลิกเพื่อดูตำแหน่งบนแผนที่ด้านบน"' : '') + '>' +
+        '<td class="nw">' + thDate(o.d) + '</td><td><div class="nm">' + esc(o.p.fullName) + '</div><div class="muted small">' + esc(o.p.ward || '') + '</div></td>' +
+        '<td class="nw">' + arGeoCell(hmOf(r.inAt), o.gi, r.inLat, r.inLng) + '</td>' +
+        '<td class="nw">' + arGeoCell(hmOf(r.outAt), o.go, r.outLat, r.outLng) + '</td>' +
+        '<td class="r num">' + arPair(arDistTxt(o.gi), arDistTxt(o.go)) + '</td>' +
+        '<td class="r num">' + arPair(arAccTxt(o.gi), arAccTxt(o.go)) + '</td>' +
+        '<td class="small">' + (r.deviceNote ? '<span class="t-bad">' + esc(r.deviceNote) + '</span>' : '–') + '</td></tr>';
+    }).join('') + '</tbody></table>' +
+    (rows.length > shown.length ? '<div class="ar-more"><button class="btn" data-armore="gps">แสดงเพิ่มอีก ' + Math.min(AR_LIMIT_STEP, rows.length - shown.length) + ' แถว</button> <span class="muted small">แสดง ' + shown.length + ' จาก ' + rows.length + ' แถว</span></div>' : '') +
+    '<p class="muted small" style="margin:12px 4px 0">รายการก่อนวันที่ระบบเริ่มเก็บพิกัดดิบ (7 พ.ย. 69) มีเฉพาะผลตรวจ (ในพื้นที่ / นอกพื้นที่ที่กำหนด) จึงไม่มีหมุดบนแผนที่และไม่มีลิงก์ 🗺️ · การสแกนรหัส QR หน้าห้องไม่ได้ตรวจพิกัด จึงไม่แสดงในแท็บนี้</p>'
+    : '<div class="empty">ไม่มีการลงชื่อที่มีผลตรวจพิกัดในช่วงที่เลือก</div>';
+};
+function arPopup(o, k) {
+  var r = o.row, g = k === 'in' ? o.gi : o.go, lb = GEO_TH[g.st] || ['', ''];
+  return '<b>' + esc(o.p.fullName) + '</b><br>' + thDate(o.d) + ' · ' + (k === 'in' ? 'เข้า ' + hmOf(r.inAt) : 'ออก ' + hmOf(r.outAt)) + ' น.<br>' +
+    esc(lb[0]) + (g.dist !== '' ? ' · ห่าง ' + Math.round(g.dist) + ' ม.' : '') + (g.acc !== '' ? ' · ±' + Math.round(g.acc) + ' ม.' : '') +
+    '<br><a href="' + geoMapUrl_(r[k + 'Lat'], r[k + 'Lng']) + '" target="_blank" rel="noopener">เปิดใน Google Maps</a>';
+}
+function arMapDraw(rows) {
+  var box = $('#arMap');
+  var refOk = AR.ref && AR.ref.lat !== '' && AR.ref.lng !== '' && isFinite(+AR.ref.lat) && isFinite(+AR.ref.lng);
+  $('#arMapSub').textContent = refOk ? 'วงกลมเส้นประ = รัศมี ' + AR.ref.radius + ' ม. รอบจุดอ้างอิง · คลิกหมุดเพื่อดูชื่อและเวลา'
+                                     : 'คลิกหมุดเพื่อดูชื่อและเวลา';
+  if (!window.L) { box.innerHTML = '<div class="empty">โหลดแผนที่ไม่ได้ (อาจถูกบล็อกโดยเครือข่าย) · ใช้ลิงก์ 🗺️ ในตารางด้านล่างแทน</div>'; return; }
+  if (!AR.map) {
+    AR.map = L.map(box, { scrollWheelZoom: false });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(AR.map);
+    AR.refLayer = L.layerGroup().addTo(AR.map);
+    AR.layer = L.layerGroup().addTo(AR.map);
+  }
+  AR.layer.clearLayers(); AR.refLayer.clearLayers(); AR.markers = {};
+  var pts = [], n = 0, MAX = 3000, ring = null;
+  rows.forEach(function (o) {
+    ['in', 'out'].forEach(function (k) {
+      var lat = o.row[k + 'Lat'], lng = o.row[k + 'Lng'], g = k === 'in' ? o.gi : o.go;
+      if (n >= MAX || !hasLatLng_(lat, lng) || !isFinite(+lat) || !isFinite(+lng)) return;
+      n++;
+      var m = L.circleMarker([+lat, +lng], { radius: 7, color: '#fff', weight: 2, fillColor: AR_GEO_COL[g.st] || '#64748b', fillOpacity: 0.92 })
+        .bindPopup(arPopup(o, k));
+      AR.layer.addLayer(m); AR.markers[o.key + '|' + k] = m; pts.push([+lat, +lng]);
+    });
+  });
+  if (refOk) {
+    var c = [+AR.ref.lat, +AR.ref.lng];
+    var ring = L.circle(c, { radius: Number(AR.ref.radius) || 150, color: '#2563eb', weight: 2, dashArray: '6 6', fillColor: '#2563eb', fillOpacity: 0.06 });
+    AR.refLayer.addLayer(ring);
+    AR.refLayer.addLayer(L.circleMarker(c, { radius: 4, color: '#2563eb', weight: 2, fillColor: '#fff', fillOpacity: 1 }).bindTooltip('จุดอ้างอิง'));
+  }
+  setTimeout(function () {
+    AR.map.invalidateSize();
+    var bd = pts.length ? L.latLngBounds(pts) : null;
+    if (ring) { var rb = ring.getBounds(); bd = bd ? bd.extend(rb) : rb; }
+    if (bd) AR.map.fitBounds(bd.pad(0.12), { maxZoom: 17 });
+    else AR.map.setView([13.7563, 100.5018], 6);
+  }, 60);
+  $('#arMapSub').textContent += ' · ' + (n ? n + ' หมุด' : 'ไม่มีพิกัดดิบในช่วงนี้') + (n >= MAX ? ' (แสดงสูงสุด ' + MAX + ')' : '');
+}
+$('#arGpsChips').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-argeo]'); if (!b) return;
+  AR.geoSt = b.getAttribute('data-argeo'); AR.gLimit = AR_LIMIT_STEP; RENDER.arGps();
+});
+$('#arGpsTable').addEventListener('click', function (e) {
+  if (e.target.closest('a')) return;
+  var m = e.target.closest('[data-armore]');
+  if (m) { AR.gLimit += AR_LIMIT_STEP; RENDER.arGps(); return; }
+  var tr = e.target.closest('[data-argps]'); if (!tr || !AR.map) return;
+  var k = tr.getAttribute('data-argps'), mk = AR.markers[k + '|in'] || AR.markers[k + '|out'];
+  if (!mk) return;
+  AR.map.setView(mk.getLatLng(), 17); mk.openPopup();
+  $('#arMap').scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
+// ------------------------------------------------------------------ แท็บ 3: ออกรายงาน
+function arSecOn() {
+  var v = store('px_ar_sec');
+  if (v == null) return AR_SECS.map(function (s) { return s[0]; });
+  return String(v).split(',').filter(String);
+}
+function arCtx() {
+  var people = arPeople(), one = people.length === 1 && !!AR.pid;
+  var scope = one ? people[0].fullName
+    : [AR.team ? 'Team ' + TEAM_L[AR.team] : 'ทุกทีม', AR.div || 'ทุกงานการพยาบาล'].concat(AR.q ? ['ค้นหา "' + AR.q + '"'] : []).join(' · ');
+  return { from: AR.from, to: AR.to, people: people, one: one, scope: scope, label: arRangeLabel() };
+}
+/** แต่ละหัวข้อคืน { title, html, aoa } — html สำหรับดู/พิมพ์ · aoa สำหรับ Excel */
+var AR_BUILD = {
+  person: function (c) {
+    var rows = c.people.map(function (p) { return { p: p, o: attStats(p, c.from, c.to) }; }).filter(function (x) { return x.o.tracked || x.o.present || x.o.leave; });
+    var head = ['ชื่อ-สกุล', 'หน่วยงาน', 'วันทำงาน', 'มาปฏิบัติงาน', 'มาหลังเวลา (ครั้ง)', 'มาหลังเวลา (นาที)', 'กลับก่อนเวลา (ครั้ง)', 'ไม่ได้ลงเวลากลับ', 'ไม่พบการลงเวลา', 'ลาเต็มวัน', 'ชม.ปฏิบัติงาน', 'ตรงเวลา %'];
+    var tot = { work: 0, present: 0, late: 0, lateMin: 0, early: 0, noOut: 0, absent: 0, leave: 0, workMin: 0 };
+    var aoa = [head];
+    var body = rows.map(function (x, i) {
+      var o = x.o; for (var k in tot) tot[k] += o[k] || 0;
+      aoa.push([x.p.fullName, x.p.ward || x.p.division || '', o.work, o.present, o.late, o.lateMin, o.early, o.noOut, o.absent, o.leave, +(o.workMin / 60).toFixed(2), o.onTime == null ? '' : Math.round(o.onTime * 1000) / 10]);
+      return '<tr><td class="nw">' + (i + 1) + '</td><td>' + esc(x.p.fullName) + '</td><td>' + esc(x.p.ward || x.p.division || '') + '</td>' +
+        '<td class="r nw">' + o.work + '</td><td class="r nw">' + o.present + '</td><td class="r nw">' + (o.late || '–') + '</td><td class="r nw">' + (o.lateMin || '–') + '</td>' +
+        '<td class="r nw">' + (o.early || '–') + '</td><td class="r nw">' + (o.noOut || '–') + '</td><td class="r nw">' + (o.absent || '–') + '</td><td class="r nw">' + (o.leave || '–') + '</td>' +
+        '<td class="r nw">' + hrs(o.workMin) + '</td><td class="r nw">' + (o.onTime == null ? '–' : Math.round(o.onTime * 100) + '%') + '</td></tr>';
+    }).join('');
+    var onT = tot.work ? Math.round((tot.present - tot.late) / tot.work * 100) + '%' : '–';
+    var html = !rows.length ? '<p class="ar-empty">ไม่มีข้อมูลการลงเวลาในช่วงนี้</p>' :
+      '<table class="tight">' + colg([3, 17, 13, 7, 6, 6, 6, 7, 7, 7, 6, 8, 7]) +
+      '<thead><tr><th>#</th><th>ชื่อ-สกุล</th><th>หน่วยงาน</th><th class="r">วันทำงาน</th><th class="r">มาปฏิบัติงาน</th><th class="r">มาหลังเวลาที่กำหนด</th><th class="r">มาหลังเวลา (นาที)</th><th class="r">กลับก่อนเวลา</th><th class="r">ไม่ได้ลงเวลากลับ</th><th class="r">ไม่พบการลงเวลา</th><th class="r">ลา</th><th class="r">ชม.ปฏิบัติงาน</th><th class="r">ตรงเวลา</th></tr></thead><tbody>' + body +
+      '</tbody>' + (rows.length > 1 ? '<tfoot><tr><td colspan="3"><b>รวม ' + rows.length + ' คน</b></td><td class="r"><b>' + tot.work + '</b></td><td class="r"><b>' + tot.present + '</b></td><td class="r"><b>' + (tot.late || '–') + '</b></td><td class="r"><b>' + (tot.lateMin || '–') + '</b></td>' +
+        '<td class="r"><b>' + (tot.early || '–') + '</b></td><td class="r"><b>' + (tot.noOut || '–') + '</b></td><td class="r"><b>' + (tot.absent || '–') + '</b></td><td class="r"><b>' + (tot.leave || '–') + '</b></td><td class="r"><b>' + hrs(tot.workMin) + '</b></td><td class="r"><b>' + onT + '</b></td></tr></tfoot>' : '') + '</table>';
+    return { title: 'สรุปรายคน', cnt: rows.length + ' คน', html: html, aoa: aoa, sheet: 'สรุปรายคน' };
+  },
+  month: function (c) {
+    var ms = [], m = ym(c.from);
+    while (m <= ym(c.to)) { ms.push(m); var y = +m.slice(0, 4), mm = +m.slice(5, 7) + 1; if (mm > 12) { mm = 1; y++; } m = y + '-' + pad(mm); }
+    var head = ['เดือน', 'ช่วงวันที่', 'วันทำงาน (คน-วัน)', 'มาปฏิบัติงาน', 'มาหลังเวลาที่กำหนด', 'กลับก่อนเวลา', 'ไม่ได้ลงเวลากลับ', 'ไม่พบการลงเวลา', 'ลาเต็มวัน', 'ชม.ปฏิบัติงาน', 'อัตราการมา %', 'ตรงเวลา %'];
+    var aoa = [head];
+    var body = ms.map(function (k) {
+      var rr = rangeOfMonths([k]), f = rr.from < c.from ? c.from : rr.from, t = rr.to > c.to ? c.to : rr.to;
+      var s = { work: 0, present: 0, late: 0, early: 0, noOut: 0, absent: 0, leave: 0, workMin: 0 };
+      c.people.forEach(function (p) { var o = attStats(p, f, t); for (var q in s) s[q] += o[q] || 0; });
+      var rate = s.work ? s.present / s.work : null, onT = s.work ? (s.present - s.late) / s.work : null;
+      var span = thDate(f) + (f !== t ? ' – ' + thDate(t) : '');
+      aoa.push([thMonth(k, true), f + ' – ' + t, s.work, s.present, s.late, s.early, s.noOut, s.absent, s.leave, +(s.workMin / 60).toFixed(2),
+                rate == null ? '' : Math.round(rate * 1000) / 10, onT == null ? '' : Math.round(onT * 1000) / 10]);
+      return '<tr><td class="nw">' + thMonth(k, true) + '</td><td class="nw small">' + span + '</td><td class="r nw">' + s.work + '</td><td class="r nw">' + s.present + '</td><td class="r nw">' + (s.late || '–') + '</td>' +
+        '<td class="r nw">' + (s.early || '–') + '</td><td class="r nw">' + (s.noOut || '–') + '</td><td class="r nw">' + (s.absent || '–') + '</td><td class="r nw">' + (s.leave || '–') + '</td>' +
+        '<td class="r nw">' + hrs(s.workMin) + '</td><td class="r nw">' + (rate == null ? '–' : Math.round(rate * 100) + '%') + '</td><td class="r nw">' + (onT == null ? '–' : Math.round(onT * 100) + '%') + '</td></tr>';
+    }).join('');
+    var html = '<table class="tight">' + colg([13, 15, 9, 6, 6, 7, 7, 7, 7, 9, 7, 7]) +
+      '<thead><tr><th>เดือน</th><th>ช่วงวันที่</th><th class="r">วันทำงาน</th><th class="r">มาปฏิบัติงาน</th><th class="r">มาหลังเวลาที่กำหนด</th><th class="r">กลับก่อนเวลา</th><th class="r">ไม่ได้ลงเวลากลับ</th><th class="r">ไม่พบการลงเวลา</th><th class="r">ลา</th><th class="r">ชม.ปฏิบัติงาน</th><th class="r">อัตราการมา</th><th class="r">ตรงเวลา</th></tr></thead><tbody>' +
+      body + '</tbody></table>';
+    return { title: 'สรุปรายเดือน', cnt: ms.length + ' เดือน', html: html, aoa: aoa, sheet: 'สรุปรายเดือน' };
+  },
+  daily: function (c) {
+    var rows = arDailyRows(c.from, c.to, c.people).sort(function (a, b) { return a.d !== b.d ? (a.d < b.d ? -1 : 1) : a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+    var head = ['วันที่', 'ชื่อ-สกุล', 'หน่วยงาน', 'เข้า', 'ออก', 'ชม.ปฏิบัติงาน', 'วิธีลงเวลา', 'สถานะ', 'มาหลังเวลา (นาที)', 'หมายเหตุ'];
+    var aoa = [head];
+    var body = rows.map(function (o, i) {
+      var r = o.row, dm = arDur(r);
+      aoa.push([o.d, o.p.fullName, o.p.ward || o.p.division || '', r ? hmOf(r.inAt) : '', r ? hmOf(r.outAt) : '', dm ? minToHm(dm) : '', arMethod(r),
+                (DS_LABEL[o.x.code] || [o.x.code])[0] + (o.x.noOut ? ' · ไม่ได้ลงเวลากลับ' : ''), r ? Number(r.lateMin) || 0 : '', arNoteText(o)]);
+      return '<tr><td class="nw">' + (i + 1) + '</td><td class="nw">' + thDate(o.d) + '</td>' +
+        (c.one ? '' : '<td>' + esc(o.p.fullName) + '</td><td>' + esc(o.p.ward || o.p.division || '') + '</td>') +
+        '<td class="r nw">' + (r ? hmOf(r.inAt) || '–' : '–') + '</td><td class="r nw">' + (r && r.outAt ? hmOf(r.outAt) : '–') + '</td><td class="r nw">' + (dm ? minToHm(dm) : '–') + '</td>' +
+        '<td>' + esc(arMethod(r)) + '</td><td>' + esc(arStatusText(o)) + '</td><td>' + esc(arNoteText(o)) + '</td></tr>';
+    }).join('');
+    var html = !rows.length ? '<p class="ar-empty">ไม่มีรายการในช่วงนี้</p>' :
+      '<table class="tight">' + colg(c.one ? [4, 11, 9, 9, 9, 16, 14, 28] : [3, 9, 14, 12, 6, 6, 7, 12, 11, 20]) +
+      '<thead><tr><th>#</th><th>วันที่</th>' + (c.one ? '' : '<th>ชื่อ-สกุล</th><th>หน่วยงาน</th>') +
+      '<th class="r">เวลามา</th><th class="r">เวลากลับ</th><th class="r">ชม.</th><th>วิธีลงเวลา</th><th>สถานะ</th><th>หมายเหตุ</th></tr></thead><tbody>' + body + '</tbody></table>';
+    return { title: 'บันทึกการลงเวลารายวัน', cnt: rows.length + ' แถว', html: html, aoa: aoa, sheet: 'การลงเวลารายวัน' };
+  },
+  gps: function (c) {
+    var rows = arGeoRows(c.from, c.to, c.people).sort(function (a, b) { return a.d !== b.d ? (a.d < b.d ? -1 : 1) : a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+    var gl = function (g) { return g.st && g.st !== 'OFF' ? GEO_TH[g.st][0] : ''; };
+    var head = ['วันที่', 'ชื่อ-สกุล', 'เวลามาปฏิบัติงาน', 'ผล GPS เข้า', 'ระยะ (เข้า) ม.', '± (เข้า) ม.', 'พิกัดเข้า', 'เวลากลับ', 'ผล GPS ออก', 'ระยะ (ออก) ม.', '± (ออก) ม.', 'พิกัดออก', 'ใช้อุปกรณ์ซ้ำกับผู้อื่น'];
+    var aoa = [head];
+    var body = rows.map(function (o, i) {
+      var r = o.row;
+      aoa.push([o.d, o.p.fullName, hmOf(r.inAt), gl(o.gi), o.gi.dist === '' ? '' : Math.round(o.gi.dist), o.gi.acc === '' ? '' : Math.round(o.gi.acc),
+                hasLatLng_(r.inLat, r.inLng) ? r.inLat + ',' + r.inLng : '', hmOf(r.outAt), gl(o.go), o.go.dist === '' ? '' : Math.round(o.go.dist),
+                o.go.acc === '' ? '' : Math.round(o.go.acc), hasLatLng_(r.outLat, r.outLng) ? r.outLat + ',' + r.outLng : '', r.deviceNote || '']);
+      var cell = function (t, g) { return (t || '–') + (gl(g) ? ' · <span class="' + GEO_TH[g.st][1] + '">' + esc(gl(g)) + '</span>' : ''); };
+      return '<tr><td class="nw">' + (i + 1) + '</td><td class="nw">' + thDate(o.d) + '</td>' + (c.one ? '' : '<td>' + esc(o.p.fullName) + '</td>') +
+        '<td>' + cell(hmOf(r.inAt), o.gi) + '</td><td>' + cell(hmOf(r.outAt), o.go) + '</td>' +
+        '<td class="r nw">' + arPair(arDistTxt(o.gi), arDistTxt(o.go)) + '</td><td class="r nw">' + arPair(arAccTxt(o.gi), arAccTxt(o.go)) + '</td>' +
+        '<td>' + esc(r.deviceNote || '–') + '</td></tr>';
+    }).join('');
+    var html = !rows.length ? '<p class="ar-empty">ไม่มีการลงชื่อที่มีผลตรวจพิกัดในช่วงนี้</p>' :
+      '<table class="tight">' + colg(c.one ? [4, 11, 22, 22, 14, 13, 14] : [3, 9, 15, 18, 18, 12, 11, 14]) +
+      '<thead><tr><th>#</th><th>วันที่</th>' + (c.one ? '' : '<th>ชื่อ-สกุล</th>') +
+      '<th>เวลามา · ผลตรวจพิกัด</th><th>เวลากลับ · ผลตรวจพิกัด</th><th class="r">ระยะห่าง (มา/กลับ)</th><th class="r">ความคลาดเคลื่อน</th><th>ใช้อุปกรณ์ซ้ำกับผู้อื่น</th></tr></thead><tbody>' + body + '</tbody></table>' +
+      '<p class="legend-note" style="margin-top:8px">แผนที่ตำแหน่งดูได้ในระบบ (แท็บ "ตำแหน่ง GPS") · ไฟล์ Excel มีพิกัดละติจูด/ลองจิจูดให้นำไปเปิดใน Google Maps ได้</p>';
+    return { title: 'บันทึกตำแหน่ง GPS', cnt: rows.length + ' แถว', html: html, aoa: aoa, sheet: 'ตำแหน่ง GPS' };
+  },
+  leave: function (c) {
+    var ix = leaveReqIndex(), rows = [];
+    c.people.forEach(function (p) {
+      (IX.recByP[p.personId] || []).forEach(function (x) {
+        if (x.date < c.from || x.date > c.to || isOffDuty(x.type)) return;
+        rows.push({ p: p, x: x, q: ix[x.recordId] });
+      });
+    });
+    leaveRowsSort(rows);
+    var aoa = [['วันที่ลา', 'วันที่ยื่น', 'ล่วงหน้า (วัน)', 'ชื่อ-สกุล', 'หน่วยงาน', 'ประเภท', 'ช่วงเวลา', 'ชั่วโมง', 'เหตุผล', 'ผู้รับรอง']];
+    rows.forEach(function (o) {
+      aoa.push([o.x.date, o.sub, o.lead == null ? '' : o.lead, o.p.fullName, o.p.ward || o.p.division || '', tlabel(o.x.type),
+                o.x.fullDay === 'Y' ? 'เต็มวัน' : (o.x.startTime ? o.x.startTime + '–' + o.x.endTime : ''), +(recMin(o.x) / 60).toFixed(2),
+                o.x.reason || (o.q && o.q.reason) || '', o.x.checkedBy || (o.q && o.q.decidedBy) || '']);
+    });
+    var html = !rows.length ? '<p class="ar-empty">ไม่มีรายการลาในช่วงนี้</p>' : leaveDetailTable(rows, { one: c.one }) +
+      '<p class="legend-note" style="margin-top:8px">ล่วงหน้า = จำนวนวันระหว่างวันที่ยื่นกับวันที่ลา · ค่าติดลบคือยื่นย้อนหลัง</p>';
+    return { title: 'รายการลา', cnt: rows.length + ' รายการ', html: html, aoa: aoa, sheet: 'รายการลา' };
+  },
+  leaveSum: function (c) {
+    var by = {}, typ = {};
+    c.people.forEach(function (p) {
+      (IX.recByP[p.personId] || []).forEach(function (x) {
+        if (x.date < c.from || x.date > c.to || isOffDuty(x.type)) return;
+        var o = by[p.personId] || (by[p.personId] = { p: p, t: {}, sum: 0, n: 0 });
+        var mn = recMin(x); o.t[x.type] = (o.t[x.type] || 0) + mn; o.sum += mn; o.n++; typ[x.type] = (typ[x.type] || 0) + mn;
+      });
+    });
+    var used = IX.typeOrder.filter(function (k) { return typ[k]; });
+    var rows = Object.keys(by).map(function (k) { return by[k]; }).sort(function (a, b) { return a.p.fullName.localeCompare(b.p.fullName, 'th'); });
+    var aoa = [['ชื่อ-สกุล', 'หน่วยงาน', 'จำนวนรายการ'].concat(used.map(tlabel), ['รวม (ชม.)'])];
+    rows.forEach(function (o) {
+      aoa.push([o.p.fullName, o.p.ward || o.p.division || '', o.n].concat(used.map(function (k) { return +((o.t[k] || 0) / 60).toFixed(2); }), [+(o.sum / 60).toFixed(2)]));
+    });
+    var total = Object.keys(typ).reduce(function (s, k) { return s + typ[k]; }, 0);
+    var tw = used.length ? Math.max(6, Math.min(9, Math.floor(58 / used.length))) : 9;
+    var html = !rows.length ? '<p class="ar-empty">ไม่มีรายการลาในช่วงนี้</p>' :
+      '<table class="tight">' + colg([3, 18, 13, 6].concat(used.map(function () { return tw; }), [8])) +
+      '<thead><tr><th>#</th><th>ชื่อ-สกุล</th><th>หน่วยงาน</th><th class="r">รายการ</th>' + used.map(function (k) { return '<th class="r">' + esc(shortHead(k)) + '</th>'; }).join('') + '<th class="r">รวม (ชม.)</th></tr></thead><tbody>' +
+      rows.map(function (o, i) {
+        return '<tr><td class="nw">' + (i + 1) + '</td><td>' + esc(o.p.fullName) + '</td><td>' + esc(o.p.ward || o.p.division || '') + '</td><td class="r nw">' + o.n + '</td>' +
+          used.map(function (k) { return '<td class="r nw">' + hrs(o.t[k]) + '</td>'; }).join('') + '<td class="r nw"><b>' + hrs(o.sum) + '</b></td></tr>';
+      }).join('') + '</tbody>' + (rows.length > 1 ? '<tfoot><tr><td colspan="4"><b>รวม ' + rows.length + ' คน</b></td>' + used.map(function (k) { return '<td class="r"><b>' + hrs(typ[k]) + '</b></td>'; }).join('') + '<td class="r"><b>' + hrs(total) + '</b></td></tr></tfoot>' : '') +
+      '</table>' + typeLegend(used);
+    return { title: 'สรุปชั่วโมงลาแยกประเภท', cnt: hrs(total, false) + ' ชม.', html: html, aoa: aoa, sheet: 'สรุปชม.ลา' };
+  }
+};
+function arBuildAll() {
+  var c = arCtx(), on = arSecOn();
+  var secs = AR_SECS.filter(function (s) { return on.indexOf(s[0]) !== -1; }).map(function (s) { return AR_BUILD[s[0]](c); });
+  return { c: c, secs: secs };
+}
+function arStrip(c) {
+  var s = { work: 0, present: 0, late: 0, absent: 0, noOut: 0, workMin: 0 };
+  c.people.forEach(function (p) { var o = attStats(p, c.from, c.to); for (var k in s) s[k] += o[k] || 0; });
+  var chip = function (l, v, u, warn) { return '<div class="stat-chip' + (warn ? ' warn' : '') + '"><div class="lbl">' + l + '</div><div class="val">' + v + '<small> ' + u + '</small></div></div>'; };
+  return '<div class="stat-strip">' +
+    chip('บุคลากร', c.people.length, 'คน') +
+    chip('มาปฏิบัติงาน', s.present, '/ ' + s.work + ' คน-วัน') +
+    chip('มาหลังเวลาที่กำหนด', s.late, 'ครั้ง', s.late > 0) +
+    chip('ไม่พบการลงเวลา', s.absent, 'ครั้ง', s.absent > 0) +
+    chip('ไม่ได้ลงเวลากลับ', s.noOut, 'ครั้ง', s.noOut > 0) +
+    chip('เวลาปฏิบัติงานรวม', hrs(s.workMin, false), 'ชม.') + '</div>';
+}
+function arReportHtml(b) {
+  var c = b.c;
+  var html = '<h2>รายงานการลงเวลาปฏิบัติงาน · ' + (c.one ? esc(c.people[0].fullName) : 'โครงการ Phoenix') + '</h2>' +
+    '<div class="meta">' + esc(c.label) + ' · ' + esc(c.scope) + (c.one ? esc([c.people[0].sap ? ' · SAP ' + c.people[0].sap : '', c.people[0].ward ? ' · ' + c.people[0].ward : ''].join('')) : ' · ' + c.people.length + ' คน') +
+    ' · เวลาทำงาน ' + workStart() + '–' + workEnd() + ' น. · ออกรายงาน ' + thDate(st.d.today) + '</div>';
+  if (!c.people.length) return html + '<p class="ar-empty">ไม่มีบุคลากรตามตัวกรองที่เลือก</p>';
+  html += arStrip(c);
+  if (!b.secs.length) return html + '<p class="ar-empty">ยังไม่ได้เลือกหัวข้อ — เลือกหัวข้อที่ต้องการด้านบน</p>';
+  b.secs.forEach(function (s) { html += '<h3>' + esc(s.title) + ' <span class="cnt">(' + esc(s.cnt) + ')</span></h3>' + s.html; });
+  return html + '<p style="font-size:12px;color:#64748b;margin-top:14px">วันทำงานไม่นับวันหยุดราชการ/เสาร์-อาทิตย์ และวันที่ลาเต็มวัน · ชม.ปฏิบัติงาน = ช่วงเวลามาปฏิบัติงานและเวลากลับ รวมกับประชุมภายในที่รับรองแล้ว (ช่วงที่ทับกันนับครั้งเดียว) · ตรงเวลา = (มาปฏิบัติงาน − มาหลังเวลาที่กำหนด) ÷ วันทำงาน</p>' + reportSign();
+}
+RENDER.arRep = function () {
+  var on = arSecOn();
+  $('#arSecs').innerHTML = AR_SECS.map(function (s) {
+    return '<label class="ar-sec' + (on.indexOf(s[0]) !== -1 ? ' on' : '') + '"><input type="checkbox" data-arsec="' + s[0] + '"' + (on.indexOf(s[0]) !== -1 ? ' checked' : '') + '>' +
+      '<span><b>' + s[1] + '</b><em>' + s[2] + '</em></span></label>';
+  }).join('');
+  if (!arPrepare('ออกรายงานการลงเวลา')) { $('#arDoc').innerHTML = '<div class="empty">กำลังโหลด…</div>'; return; }
+  $('#arDoc').innerHTML = formalReport(arReportHtml(arBuildAll()));
+};
+$('#arSecs').addEventListener('change', function (e) {
+  var cb = e.target.closest('[data-arsec]'); if (!cb) return;
+  var on = $$('#arSecs [data-arsec]').filter(function (x) { return x.checked; }).map(function (x) { return x.getAttribute('data-arsec'); });
+  store('px_ar_sec', on.join(','));
+  RENDER.arRep();
+});
+function arFileBase() {
+  var c = arCtx();
+  return 'Phoenix_ลงเวลา_' + (c.one ? (c.people[0].sap || c.people[0].personId) + '_' : '') + c.from + '_' + c.to + (AR.team ? '_' + AR.team : '');
+}
+$('#arPdf').addEventListener('click', function () {
+  if (AR.loading) return toast('กำลังโหลดข้อมูลย้อนหลัง กรุณารอสักครู่', true);
+  RENDER.arRep();
+  var pg = $('#page-clock'); pg.classList.add('print-on');
+  setTimeout(function () { window.print(); pg.classList.remove('print-on'); }, 50);
+});
+$('#arXlsx').addEventListener('click', function () {
+  if (AR.loading) return toast('กำลังโหลดข้อมูลย้อนหลัง กรุณารอสักครู่', true);
+  if (!window.XLSX) return toast('โหลดตัวสร้างไฟล์ Excel ไม่ได้', true);
+  var b = arBuildAll(), c = b.c;
+  if (!b.secs.length) return toast('กรุณาเลือกหัวข้ออย่างน้อย 1 หัวข้อ', true);
+  var wb = XLSX.utils.book_new();
+  var info = [['รายงานการลงเวลาปฏิบัติงาน · โครงการ Phoenix'], ['ช่วงวันที่', c.from + ' ถึง ' + c.to], ['ขอบเขต', c.scope], ['ออกรายงาน', st.d.today]];
+  b.secs.forEach(function (s) {
+    var head = (s.aoa[0] || []).map(function (h) { return formalReport(h); });
+    var ws = XLSX.utils.aoa_to_sheet([[formalReport(s.title + ' · ' + c.label)], [c.scope], []].concat([head], s.aoa.slice(1)));
+    ws['!cols'] = (s.aoa[0] || []).map(function (h) { return { wch: Math.max(10, String(h).length + 4) }; });
+    XLSX.utils.book_append_sheet(wb, ws, s.sheet);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(info), 'ข้อมูลรายงาน');
+  var out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  download(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), arFileBase() + '.xlsx');
+});
+</script>
